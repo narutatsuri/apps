@@ -1,0 +1,74 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="katex.min.css">
+<script src="katex.min.js"></script>
+<style>
+  html, body { margin: 0; padding: 0; }
+  /* inline-block so the span shrink-wraps the equation and can be measured */
+  #m { display: inline-block; white-space: nowrap; padding: 0 1px; }
+  .katex-display { margin: 0; }
+</style>
+</head>
+<body><span id="m"></span>
+<script>
+  // Split in two on purpose. KaTeX's fonts load lazily, so a glyph that comes
+  // from a font the page has not fetched yet — the integral sign lives in
+  // KaTeX_Size2, not in KaTeX_Main — is simply missing from a capture taken too
+  // early, and the measurement is wrong with it. The caller places the equation,
+  // awaits document.fonts.ready, and only then measures and captures.
+  function place(tex, display, px, colour, background) {
+    document.body.style.background = background;
+    const m = document.getElementById('m');
+    m.style.fontSize = px + 'px';
+    m.style.color = colour;
+    let html;
+    try {
+      html = katex.renderToString(tex, {
+        displayMode: display, throwOnError: false, output: 'html'
+      });
+    } catch (e) {
+      // Unparseable TeX still has to show something, or a typo looks like a
+      // crash. The source, plainly, is the least surprising fallback.
+      const esc = tex.replace(/[<&]/g, c => (c === '<' ? '&lt;' : '&amp;'));
+      html = '<span style="opacity:.65">' + esc + '</span>';
+    }
+    m.innerHTML = '<span id="b" style="display:inline-block;width:0;height:0"></span>' + html;
+  }
+
+  // Every KaTeX face, fetched before a single equation is captured.
+  //
+  // document.fonts.ready alone is not enough: it settles the loads already in
+  // flight, and the font a glyph needs is only requested once layout reaches
+  // that glyph — so an integral sign, which lives in KaTeX_Size2, can still be
+  // missing from a capture whose layout looks perfectly correct. Everything is
+  // loaded up front instead, once, before the first render.
+  async function warm() {
+    const families = ['KaTeX_Main', 'KaTeX_Math', 'KaTeX_AMS', 'KaTeX_Caligraphic',
+                      'KaTeX_Fraktur', 'KaTeX_SansSerif', 'KaTeX_Script',
+                      'KaTeX_Typewriter', 'KaTeX_Size1', 'KaTeX_Size2',
+                      'KaTeX_Size3', 'KaTeX_Size4'];
+    const styles = ['', 'italic ', 'bold '];
+    await Promise.all(families.flatMap(family =>
+      styles.map(style => document.fonts.load(style + '16px "' + family + '"')
+                                  .catch(() => {}))));
+    await document.fonts.ready;
+    return 'warm';
+  }
+
+  // The zero-size span is the baseline probe: an inline-block of no height sits
+  // exactly on the baseline, so its bottom edge is where the surrounding text's
+  // baseline would be.
+  function measure() {
+    const r = document.getElementById('m').getBoundingClientRect();
+    const b = document.getElementById('b').getBoundingClientRect();
+    return JSON.stringify({
+      w: Math.max(1, Math.ceil(r.width)),
+      h: Math.max(1, Math.ceil(r.height)),
+      baseline: b.bottom - r.top
+    });
+  }
+</script>
+</body>
+</html>

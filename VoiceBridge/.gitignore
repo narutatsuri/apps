@@ -1,0 +1,9 @@
+.build/
+build/
+*.iconset/
+.DS_Store
+
+# The whisper model is ~465 MB and lives in ~/Library/Application Support/VoiceBridge.
+# build.sh downloads it if missing — it must never enter the repo.
+models/
+*.bin

@@ -1,0 +1,7 @@
+.build/
+build/
+*.iconset/
+.DS_Store
+
+# reference/ is deliberately NOT ignored — it holds the only surviving copy of the
+# original 2025 binary, whose source was lost.
