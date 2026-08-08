@@ -10,14 +10,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Store.shared.bootstrap()
         installStatusItem()
         MainMenu.install(target: self)
+        Theme.watchSystem()
+        NotificationCenter.default.addObserver(
+            forName: Theme.changed, object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated { StickyWindow.applyTheme() }
+        }
 
         // Same checks as --selftest, but here: real app, real .accessory
         // policy, no menu bar, launched the way it is normally launched.
         if ProcessInfo.processInfo.environment["JOT_KEYTEST"] == "1" {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                 KeyTest.run(nonactivating: false) { bare in
+                KeyTest.runOpenDoesNotErase { safety in
                 KeyTest.runInRealNote { real in
-                    let results = bare + real
+                    let results = bare + safety + real
                     let lines = results.map {
                         "\($0.ok ? "PASS" : "FAIL")  \($0.label)"
                             + ($0.ok || $0.detail.isEmpty ? "" : " — \($0.detail)")
@@ -28,6 +34,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         ?? NSTemporaryDirectory() + "jot-keytest.txt"
                     try? report.write(toFile: out, atomically: true, encoding: .utf8)
                     NSApp.terminate(nil)
+                }
                 }
                 }
             }
@@ -174,6 +181,21 @@ extension AppDelegate: NSMenuDelegate {
         }
 
         menu.addItem(.separator())
+
+        let theme = NSMenuItem(title: "Appearance", action: nil, keyEquivalent: "")
+        let themes = NSMenu()
+        for option in Theme.Preference.allCases {
+            let item = NSMenuItem(title: option.label, action: #selector(menuTheme(_:)),
+                                  keyEquivalent: "")
+            item.target = self
+            item.representedObject = option.rawValue
+            item.state = Theme.preference == option ? .on : .off
+            themes.addItem(item)
+        }
+        theme.submenu = themes
+        menu.addItem(theme)
+
+        menu.addItem(.separator())
         let folder = NSMenuItem(title: "Open ~/jot", action: #selector(menuFolder),
                                 keyEquivalent: "")
         folder.target = self
@@ -184,7 +206,7 @@ extension AppDelegate: NSMenuDelegate {
         for line in ["⌃⌥Space  new · ⌃⌥S  show/hide",
                      "⌘B bold · ⌘I italic · ⌘E code",
                      "⌘⇧H highlight · ⌘⇧X strike · ⌘⇧M maths",
-                     "⌘R render · ⌘1–6 colour · ⌘⌫ delete"] {
+                     "⌘R render · ⌘1–6 colour · ⌘⇧D dark · ⌘⌫ delete"] {
             let hint = NSMenuItem(title: line, action: nil, keyEquivalent: "")
             hint.isEnabled = false
             hint.attributedTitle = NSAttributedString(string: line, attributes: [
@@ -203,7 +225,7 @@ extension AppDelegate: NSMenuDelegate {
         let size = NSSize(width: 11, height: 11)
         let image = NSImage(size: size)
         image.lockFocus()
-        let hex = colour.paper.light
+        let hex = Theme.current == .dark ? colour.paper.dark : colour.paper.light
         NSColor(srgbRed: Double((hex >> 16) & 0xFF) / 255,
                 green: Double((hex >> 8) & 0xFF) / 255,
                 blue: Double(hex & 0xFF) / 255, alpha: 1).setFill()
@@ -218,6 +240,12 @@ extension AppDelegate: NSMenuDelegate {
         guard let id = sender.representedObject as? String else { return }
         StickyWindow.show(id)
     }
+    @objc func menuTheme(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let choice = Theme.Preference(rawValue: raw) else { return }
+        Theme.preference = choice
+    }
+    @objc func menuToggleTheme() { Theme.toggle() }
     @objc func menuFolder() {
         NSWorkspace.shared.open(Store.root)
     }

@@ -81,10 +81,10 @@ struct MarkdownEditor: NSViewRepresentable {
         view.drawsBackground = true
         view.textContainerInset = NSSize(width: 6, height: 10)
         view.typingAttributes = Attributed.attributes(style: [], ink: ink)
-        // Selection has to stay legible on yellow paper; the system accent at
-        // full strength on a light background hides the text under it.
-        let selection: [NSAttributedString.Key: Any] =
-            [.backgroundColor: NSColor.black.withAlphaComponent(0.14)]
+        // Selection has to stay legible on coloured paper; the system accent at
+        // full strength hides the text under it. Inverts with the theme, or the
+        // wash disappears entirely on dark paper.
+        let selection: [NSAttributedString.Key: Any] = [.backgroundColor: Theme.selectionTint]
         view.selectedTextAttributes = selection
 
         let scroll = NSScrollView()
@@ -108,14 +108,34 @@ struct MarkdownEditor: NSViewRepresentable {
         view.ink = ink
         view.paper = paper
         view.backgroundColor = paper
+        view.insertionPointColor = ink
+        view.selectedTextAttributes = [.backgroundColor: Theme.selectionTint]
         scroll.backgroundColor = paper
+
+        // A theme change repaints everything: the styling and the equations are
+        // baked into the storage as colours and images, so nothing short of
+        // rebuilding them picks up new ink. Cheap, and only on an actual change.
+        guard let storage = view.textStorage else { return }
+        // The binding is the source of truth, except when it has not been
+        // filled in yet: rebuilding from an empty `text` over a buffer that has
+        // content is how a note gets erased by a repaint.
+        let stale = text.isEmpty && storage.length > 0
+        if context.coordinator.appearance != Theme.current, !stale {
+            context.coordinator.appearance = Theme.current
+            let caret = view.selectedRange()
+            storage.setAttributedString(Attributed.make(from: text, ink: ink, paper: paper))
+            view.undoManager?.removeAllActions()
+            view.setSelectedRange(NSRange(location: min(caret.location, storage.length),
+                                          length: min(caret.length, storage.length - min(caret.location, storage.length))))
+            view.typingAttributes = Attributed.attributes(style: [], ink: ink)
+            return
+        }
 
         // Only touch the text when it changed underneath us — rebuilding
         // unconditionally would drop the selection on every keystroke. The
         // comparison is in markdown, because that is the shared language
         // between the styled buffer and the note.
-        guard let storage = view.textStorage,
-              Attributed.markdown(from: storage) != text else { return }
+        guard !stale, Attributed.markdown(from: storage) != text else { return }
         let caret = view.selectedRange()
         storage.setAttributedString(Attributed.make(from: text, ink: ink, paper: paper))
         // The undo stack still holds ranges into the text that was just thrown
@@ -135,6 +155,8 @@ struct MarkdownEditor: NSViewRepresentable {
         /// the first `**bold**` would recurse until the stack ran out.
         private var isCollapsing = false
         private var editedRange: NSRange?
+        /// What the storage was last built for, so a theme change is noticed.
+        var appearance = Theme.current
 
         init(_ parent: MarkdownEditor) { self.parent = parent }
 

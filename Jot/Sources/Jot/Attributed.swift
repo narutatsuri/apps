@@ -201,18 +201,18 @@ enum Attributed {
         if heading > 0 { attrs[headingKey] = heading }
 
         if style.contains(.code) || style.contains(.fenced) {
-            attrs[.backgroundColor] = NSColor.black.withAlphaComponent(0.07)
-            attrs[.foregroundColor] = NSColor(srgbRed: 0.45, green: 0.16, blue: 0.16, alpha: 1)
+            attrs[.backgroundColor] = Theme.codeTint
+            attrs[.foregroundColor] = Theme.codeInk
         }
         if style.contains(.highlight) {
-            attrs[.backgroundColor] = NSColor.systemYellow.withAlphaComponent(0.55)
+            attrs[.backgroundColor] = Theme.highlightTint
         }
         if style.contains(.strikethrough) {
             attrs[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
         }
         if let link {
             attrs[linkKey] = link
-            attrs[.foregroundColor] = NSColor(srgbRed: 0.11, green: 0.34, blue: 0.72, alpha: 1)
+            attrs[.foregroundColor] = Theme.linkInk
             attrs[.underlineStyle] = NSUnderlineStyle.single.rawValue
         }
         if bullet {

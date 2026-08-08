@@ -174,6 +174,56 @@ enum KeyTest {
         }
     }
 
+    /// Opening a note must not empty it.
+    ///
+    /// This cost real notes twice. The view's `text` starts empty and is filled
+    /// in by `load()`; anything that saved before that — a relayout, a theme
+    /// change — wrote the emptiness to the file, and the store treats a blank
+    /// note as one you are finished with. Nothing on screen said so.
+    @MainActor
+    static func runOpenDoesNotErase(then finish: @escaping ([Result]) -> Void) {
+        var out: [Result] = []
+        let written = "a real note\n\nwith **content** and $x^2$ in it"
+        let sticky = Store.shared.create(colour: .green, text: written)
+        Store.shared.flush(sticky.id)
+
+        guard let controller = StickyWindow.show(sticky.id), controller.window != nil else {
+            out.append(Result(label: "a note with content opens", ok: false))
+            finish(out)
+            return
+        }
+
+        // Long enough to outlast the store's write debounce, so a blank save
+        // would have landed by the time this looks.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            let onDisk = (try? String(contentsOf: Store.shared.url(for: sticky.id),
+                                      encoding: .utf8)) ?? ""
+            out.append(Result(label: "opening a note does not erase it",
+                              ok: onDisk.contains("with **content**"),
+                              detail: onDisk.isEmpty ? "the file is gone" : "the file lost its text"))
+            out.append(Result(label: "and the note is still in the store",
+                              ok: Store.shared.sticky(sticky.id)?.text == written,
+                              detail: "store holds \(Store.shared.sticky(sticky.id)?.text ?? "nothing")"))
+
+            // Same again across a theme change, which repaints every note by
+            // rebuilding its text — the exact path that erased them.
+            let was = Theme.preference
+            Theme.preference = Theme.current == .dark ? .light : .dark
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                let after = (try? String(contentsOf: Store.shared.url(for: sticky.id),
+                                         encoding: .utf8)) ?? ""
+                out.append(Result(label: "switching theme does not erase it",
+                                  ok: after.contains("with **content**"),
+                                  detail: after.isEmpty ? "the file is gone"
+                                                        : "the file lost its text"))
+                Theme.preference = was
+                StickyWindow.close(sticky.id)
+                Store.shared.delete(sticky.id)
+                finish(out)
+            }
+        }
+    }
+
     /// The same keys, but aimed at a real note window rather than a bare panel.
     ///
     /// A note is a SwiftUI view hosted in an `NSPanel`, so its text view sits

@@ -85,6 +85,16 @@ enum MainMenu {
         formatItem.submenu = format
         menu.addItem(formatItem)
 
+        // View. ⌘R and ⌘1–6 are per-note and live in the note's own view; this
+        // is app-wide, so it belongs here where one handler serves every window.
+        let viewItem = NSMenuItem()
+        let view = NSMenu(title: "View")
+        let dark = add(to: view, "Toggle Dark Mode",
+                       #selector(AppDelegate.menuToggleTheme), target, "d")
+        dark.keyEquivalentModifierMask = [.command, .shift]
+        viewItem.submenu = view
+        menu.addItem(viewItem)
+
         let windowItem = NSMenuItem()
         let window = NSMenu(title: "Window")
         window.addItem(withTitle: "Minimise", action: #selector(NSWindow.performMiniaturize(_:)),

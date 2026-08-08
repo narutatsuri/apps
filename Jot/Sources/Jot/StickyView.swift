@@ -24,16 +24,29 @@ struct StickyView: View {
     @State private var rendered = false
     @State private var floats = true
     @State private var showingPalette = false
+    /// Nothing is written back until the note has actually been read in.
+    ///
+    /// `text` starts empty, and a save triggered before `load()` runs — by a
+    /// relayout, a theme change, anything — wrote that emptiness over the file.
+    /// The store treats a blank note as one you are finished with, so the note
+    /// was binned. This is the guard that makes the window's first job reading,
+    /// not writing.
+    @State private var loaded = false
     @FocusState private var editing: Bool
     /// Held so ⌘B and friends can reach the text view, which owns the selection.
     @State private var editor = EditorHandle()
 
-    private var paper: Color { Color(hex: colour.paper.light) }
-    private var paperNS: NSColor {
-        let hex = colour.paper.light
-        return NSColor(srgbRed: Double((hex >> 16) & 0xFF) / 255,
-                       green: Double((hex >> 8) & 0xFF) / 255,
-                       blue: Double(hex & 0xFF) / 255, alpha: 1)
+    /// Held as state purely so a theme change redraws the view: everything is
+    /// read from `Theme`, which SwiftUI cannot observe on its own.
+    @State private var appearance = Theme.current
+
+    private var paperNS: NSColor { Theme.paper(colour) }
+    private var paper: Color { Color(nsColor: paperNS) }
+    private var inkNS: NSColor { Theme.ink }
+    private var ink: Color { Color(nsColor: inkNS) }
+    /// The swatch in the palette shows the paper you would actually get.
+    private func swatch(_ c: StickyColour) -> Color {
+        Color(hex: appearance == .dark ? c.paper.dark : c.paper.light)
     }
 
     var body: some View {
@@ -47,6 +60,9 @@ struct StickyView: View {
         .ignoresSafeArea()
         .onAppear(perform: load)
         .onChange(of: text) { _, _ in persist() }
+        .onReceive(NotificationCenter.default.publisher(for: Theme.changed)) { _ in
+            appearance = Theme.current
+        }
     }
 
     @ViewBuilder
@@ -58,7 +74,7 @@ struct StickyView: View {
             // Black ink on the paper colour, markdown styled as you type, and
             // paste arrives plain — see MarkdownEditor for why none of those are
             // available from SwiftUI's TextEditor.
-            MarkdownEditor(text: $text, paper: paperNS, handle: editor)
+            MarkdownEditor(text: $text, paper: paperNS, handle: editor, ink: inkNS)
                 .padding(.top, 20)   // clear of the transparent title bar
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -72,7 +88,7 @@ struct StickyView: View {
                 showingPalette.toggle()
             } label: {
                 Circle().fill(paper)
-                    .overlay(Circle().strokeBorder(.black.opacity(0.25), lineWidth: 1))
+                    .overlay(Circle().strokeBorder(ink.opacity(0.25), lineWidth: 1))
                     .frame(width: 13, height: 13)
             }
             .buttonStyle(.plain)
@@ -85,9 +101,9 @@ struct StickyView: View {
                             showingPalette = false
                             persist()
                         } label: {
-                            Circle().fill(Color(hex: c.paper.light))
+                            Circle().fill(swatch(c))
                                 .overlay(Circle().strokeBorder(
-                                    c == colour ? Color.accentColor : .black.opacity(0.2),
+                                    c == colour ? Color.accentColor : ink.opacity(0.25),
                                     lineWidth: c == colour ? 2 : 1))
                                 .frame(width: 20, height: 20)
                         }
@@ -124,7 +140,7 @@ struct StickyView: View {
             if !text.isEmpty {
                 Text("\(text.count)")
                     .font(.system(size: 9).monospacedDigit())
-                    .foregroundStyle(.black.opacity(0.35))
+                    .foregroundStyle(ink.opacity(0.35))
             }
 
             Button {
@@ -136,10 +152,12 @@ struct StickyView: View {
             .buttonStyle(.plain)
             .help("Delete (⌘⌫) — moved to ~/jot/.trash, not gone")
         }
-        .foregroundStyle(.black.opacity(0.55))
+        .foregroundStyle(ink.opacity(0.55))
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
-        .background(paper.brightness(-0.05))
+        // Darker than the paper in light mode, lighter in dark mode — either
+        // way the strip has to separate from the writing above it.
+        .background(paper.brightness(appearance == .dark ? 0.06 : -0.05))
         // Keyboard is the point of this app; every button above has one.
         .background {
             Group {
@@ -163,6 +181,7 @@ struct StickyView: View {
 
     private func load() {
         guard let s = Store.shared.sticky(id) else { return }
+        defer { loaded = true }
         text = s.text
         colour = s.colour
         rendered = s.rendered
@@ -172,7 +191,7 @@ struct StickyView: View {
     }
 
     private func persist() {
-        guard var s = Store.shared.sticky(id) else { return }
+        guard loaded, var s = Store.shared.sticky(id) else { return }
         s.text = text
         s.colour = colour
         s.rendered = rendered

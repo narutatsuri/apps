@@ -9,6 +9,13 @@ import WebKit
 enum SelfTest {
     @MainActor
     static func run() -> Never {
+        func rgbText(_ colour: NSColor) -> String {
+            let c = colour.usingColorSpace(.sRGB) ?? colour
+            return "rgb(\(Int((c.redComponent * 255).rounded())), "
+                 + "\(Int((c.greenComponent * 255).rounded())), "
+                 + "\(Int((c.blueComponent * 255).rounded())))"
+        }
+
         // Line-buffered: piped to a file, a crash or a hang would otherwise
         // swallow every result printed before it, which is exactly when you
         // most want to see them.
@@ -114,6 +121,46 @@ enum SelfTest {
               StickyColour.allCases.allSatisfy { $0.paper.light != 0 && $0.paper.dark != 0 })
         check("colours are distinct",
               Set(StickyColour.allCases.map { $0.paper.light }).count == StickyColour.allCases.count)
+
+        // --- emptying a note must be recoverable, not final
+        //
+        // The store treats a blank note as one you are finished with, and this
+        // used to call removeItem: any path that produced a transiently empty
+        // note — a second instance of the app, a view that had not read its
+        // file yet — destroyed it outright. That happened, twice, to real
+        // notes. The root cause is guarded against in the view now, but this is
+        // the guarantee that does not depend on having found every such path.
+        let probeID = "selftest-recoverable-" + Sticky.newID()
+        let probeURL = Store.shared.url(for: probeID)
+        let trashed = Store.trash.appendingPathComponent(probeID)
+        try? "---\nid: \(probeID)\n---\n\nwords worth keeping\n"
+            .write(to: probeURL, atomically: true, encoding: .utf8)
+        Store.shared.reload()
+        check("the probe note was picked up", Store.shared.sticky(probeID) != nil)
+
+        var emptied = Store.shared.sticky(probeID) ?? Sticky(id: probeID)
+        emptied.text = ""
+        Store.shared.save(emptied, debounce: 0)
+        Store.shared.flush(probeID)
+
+        let stillThere = FileManager.default.fileExists(atPath: probeURL.path)
+        let inTrash = (try? FileManager.default.contentsOfDirectory(
+            atPath: Store.trash.path))?.filter { $0.hasPrefix(probeID) } ?? []
+        check("an emptied note leaves the folder", !stillThere)
+        check("but lands in .trash rather than being destroyed", !inTrash.isEmpty,
+              "emptying a note has to be recoverable — it has cost real writing twice")
+        if let name = inTrash.first {
+            let saved = (try? String(contentsOf: Store.trash.appendingPathComponent(name),
+                                     encoding: .utf8)) ?? ""
+            check("and the trashed copy still holds the words",
+                  saved.contains("words worth keeping"))
+        }
+        // Leave no litter behind.
+        for name in inTrash {
+            try? FileManager.default.removeItem(at: Store.trash.appendingPathComponent(name))
+        }
+        _ = trashed
+        Store.shared.reload()
 
         // --- the parser, which is invisible in a screenshot and exact here
         func kinds(_ text: String) -> [Highlighter.Kind] {
@@ -297,6 +344,11 @@ enum SelfTest {
                 exit(fails == 0 ? 0 : 1)
             }
             let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+            // Deliberately dark. The rendered view is drawn on the sticky's own
+            // paper colour, so a system-appearance rule put pale grey text on
+            // yellow and the note became unreadable — a failure that only ever
+            // showed up for someone running the OS in dark mode.
+            web.appearance = NSAppearance(named: .darkAqua)
             web.loadFileURL(webRoot.appendingPathComponent("render.html"),
                             allowingReadAccessTo: webRoot)
             let script = "window.renderMarkdown ? (renderMarkdown("
@@ -321,8 +373,71 @@ enum SelfTest {
                 check("the typeset output is real markup, not the source",
                       html.contains("<span") && !html.contains("\\sum"))
 
-                print(fails == 0 ? "\nALL PASS" : "\n\(fails) FAILURE(S)")
-                exit(fails == 0 ? 0 : 1)
+                // --- and nothing is drawn in a colour you cannot read
+                //
+                // Checked under a dark system appearance on purpose: the page
+                // used to take its colour from prefers-color-scheme, which put
+                // pale grey text on yellow paper for anyone running the OS in
+                // dark mode. The palette is handed in by the app now, so both
+                // of Jot's own themes are checked against the ink they claim.
+                let inkScript = """
+                    (function () {
+                      renderMarkdown('# One\\n## Two\\n### Three\\n\\nbody **bold** text\\n\\n- item\\n\\n> quoted\\n\\n| a | b |\\n| - | - |\\n| c | d |');
+                      var look = function (s) {
+                        var e = document.querySelector(s);
+                        if (!e) return 'missing';
+                        var c = getComputedStyle(e);
+                        return c.color + ' @' + c.opacity;
+                      };
+                      return JSON.stringify({
+                        body: look('body'), h1: look('h1'), h2: look('h2'), h3: look('h3'),
+                        p: look('p'), li: look('li'), quote: look('blockquote'),
+                        cell: look('td'), strong: look('strong')
+                      });
+                    })()
+                    """
+
+            @MainActor func inkCheck(_ preference: Theme.Preference,
+                                     _ done: @escaping () -> Void) {
+                Theme.preference = preference
+                let expected = rgbText(Theme.ink)
+                let palette = MarkdownPreview.palette()
+                let vars = String(data: (try? JSONSerialization.data(withJSONObject: palette))
+                                    ?? Data(), encoding: .utf8) ?? "{}"
+                // Applied on its own rather than prepended to the measuring
+                // script: a combined body came back as "an unsupported type"
+                // from WebKit on the second call, and one statement per call is
+                // not worth debugging around.
+                // evaluateJavaScript with an expression, not callAsyncJavaScript:
+                // a second call of the latter came back as "an unsupported
+                // type" whatever the body, and this form already works above.
+                web.evaluateJavaScript("window.applyTheme(\(vars));")
+                web.evaluateJavaScript(inkScript) { value, error in
+                    let json = value as? String ?? ""
+                    let failure = error.map { " js error: \($0.localizedDescription)" } ?? ""
+                    let colours = (try? JSONSerialization.jsonObject(
+                        with: Data(json.utf8))) as? [String: String] ?? [:]
+                    // Anything not fully opaque in the note's own ink is text
+                    // someone cannot read on that paper.
+                    let wrong = colours.filter { $0.value != expected + " @1" }
+                    check("\(preference.rawValue) mode renders every kind of text in its ink",
+                          !colours.isEmpty && wrong.isEmpty,
+                          colours.isEmpty ? "no answer\(failure) raw=\(json.prefix(120))"
+                                          : "expected \(expected), got "
+                                            + wrong.map { "\($0.key)=\($0.value)" }
+                                                   .sorted().joined(separator: " "))
+                    done()
+                }
+            }
+
+            inkCheck(.light) {
+                inkCheck(.dark) {
+                    Theme.preference = .system    // leave the app as it was found
+                    print(fails == 0 ? "\nALL PASS" : "\n\(fails) FAILURE(S)")
+                    exit(fails == 0 ? 0 : 1)
+                }
+            }
+
             }
         }
         app.run()

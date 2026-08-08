@@ -16,6 +16,7 @@ struct MarkdownPreview: NSViewRepresentable {
         let view = WKWebView(frame: .zero, configuration: config)
         view.navigationDelegate = context.coordinator
         view.setValue(false, forKey: "drawsBackground")   // let SwiftUI's surface show
+        view.appearance = Theme.nsAppearance
         view.allowsMagnification = false
         // Belt and braces alongside sizeThatFits: never push back against the size
         // the layout wants to give.
@@ -37,7 +38,25 @@ struct MarkdownPreview: NSViewRepresentable {
 
     func updateNSView(_ view: WKWebView, context: Context) {
         context.coordinator.pending = markdown
+        context.coordinator.palette = Self.palette()
         context.coordinator.flush(into: view)
+    }
+
+    /// The same colours the editor uses, in CSS. Handed over rather than left
+    /// to a media query: this page sits on the sticky's paper, so it has to
+    /// follow the app's theme and not the system's.
+    static func palette() -> [String: String] {
+        [
+            "ink": Theme.css(Theme.ink),
+            "ink-dim": Theme.css(Theme.dimmedInk(0.45)),
+            "rule": Theme.css(Theme.dimmedInk(0.32)),
+            "tint": Theme.css(Theme.codeTint),
+            "tint-soft": Theme.css(Theme.codeTint.withAlphaComponent(
+                Theme.codeTint.alphaComponent * 0.8)),
+            "code-ink": Theme.css(Theme.codeInk),
+            "link": Theme.css(Theme.linkInk),
+            "scheme": Theme.current == .dark ? "dark" : "light",
+        ]
     }
 
     /// Accept whatever size the layout offers instead of reporting the rendered
@@ -58,6 +77,7 @@ struct MarkdownPreview: NSViewRepresentable {
 
     final class Coordinator: NSObject, WKNavigationDelegate {
         var pending: String = ""
+        var palette: [String: String] = [:]
         private var ready = false
         private weak var view: WKWebView?
 
@@ -72,6 +92,12 @@ struct MarkdownPreview: NSViewRepresentable {
             guard ready else { self.view = webView; return }
             let data = (try? JSONSerialization.data(withJSONObject: [pending])) ?? Data()
             let json = String(data: data, encoding: .utf8) ?? "[\"\"]"
+            // The palette goes first, or the note is briefly drawn in the
+            // stylesheet's defaults — a white flash on dark paper.
+            if let vars = try? JSONSerialization.data(withJSONObject: palette),
+               let text = String(data: vars, encoding: .utf8) {
+                webView.evaluateJavaScript("window.applyTheme(\(text));")
+            }
             // Passing through JSON avoids every quoting and newline hazard.
             webView.evaluateJavaScript("window.renderMarkdown(\(json)[0]);")
         }

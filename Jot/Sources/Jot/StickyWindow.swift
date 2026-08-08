@@ -52,6 +52,12 @@ final class StickyWindow: NSWindowController, NSWindowDelegate {
 
     static func forget(_ id: String) { open[id] = nil }
 
+    /// Repaints every open sticky's chrome when the theme changes. The contents
+    /// are SwiftUI's problem; the window frame is this one's.
+    static func applyTheme() {
+        for controller in open.values { controller.window?.appearance = Theme.nsAppearance }
+    }
+
     private init(stickyID: String) {
         self.stickyID = stickyID
         let sticky = Store.shared.sticky(stickyID)
@@ -73,6 +79,9 @@ final class StickyWindow: NSWindowController, NSWindowDelegate {
         panel.isReleasedWhenClosed = false
         panel.animationBehavior = .utilityWindow
         panel.minSize = NSSize(width: 220, height: 140)
+        // The title bar is transparent but its traffic lights and any sheet it
+        // shows are not: without this they stay light over dark paper.
+        panel.appearance = Theme.nsAppearance
 
         super.init(window: panel)
         panel.delegate = self
