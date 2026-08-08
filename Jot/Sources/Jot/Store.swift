@@ -81,13 +81,27 @@ final class Store {
     }
 
     private func writeNow(_ sticky: Sticky) {
-        // A sticky emptied out is a sticky you are done with. Removing it here
-        // keeps a folder of scratch buffers from filling with blank files.
+        // A sticky emptied out is a sticky you are done with, and a folder of
+        // scratch buffers should not fill with blank files. But it goes to the
+        // trash, not to nothing: this used to call removeItem, and any path
+        // that made an in-memory copy blank — a second instance of the app with
+        // a stale store, an editor that had not loaded yet — destroyed the file
+        // with no way back. It cost a real note. Deletion has exactly one
+        // meaning here now, and it is recoverable.
         guard !sticky.isBlank else {
-            try? FileManager.default.removeItem(at: url(for: sticky.id))
+            bin(sticky.id)
             return
         }
         try? sticky.markdown.write(to: url(for: sticky.id), atomically: true, encoding: .utf8)
+    }
+
+    /// Moves a note's file into `.trash`, keeping whatever is already there.
+    private func bin(_ id: String) {
+        let from = url(for: id)
+        guard FileManager.default.fileExists(atPath: from.path) else { return }
+        let to = Self.trash.appendingPathComponent(
+            "\(id)-\(Int(Date().timeIntervalSince1970)).md")
+        try? FileManager.default.moveItem(at: from, to: to)
     }
 
     @discardableResult
@@ -102,12 +116,7 @@ final class Store {
     func delete(_ id: String) {
         saveWork[id]?.cancel()
         saveWork[id] = nil
-        let from = url(for: id)
-        if FileManager.default.fileExists(atPath: from.path) {
-            let to = Self.trash.appendingPathComponent(
-                "\(id)-\(Int(Date().timeIntervalSince1970)).md")
-            try? FileManager.default.moveItem(at: from, to: to)
-        }
+        bin(id)
         stickies[id] = nil
     }
 }

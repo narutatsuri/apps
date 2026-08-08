@@ -409,7 +409,21 @@ enum KeyTest {
                 board.clearContents()
                 if let borrowed { board.setString(borrowed, forType: .string) }
                 StickyWindow.close(sticky.id)
-                Store.shared.delete(sticky.id)
+                // Only bin it if it still holds what the test put there.
+                //
+                // This test makes its window key and activates the app, so it
+                // takes focus from whatever was in front — and anything typed
+                // or dictated while it runs lands in this note. Deleting it
+                // unconditionally once cost a real note, recovered from
+                // ~/jot/.trash. A stray test note is a far smaller problem than
+                // a deleted thought.
+                let final = Store.shared.sticky(sticky.id)?.text ?? ""
+                if final.isEmpty || final == "keep this" || final.contains("say ") {
+                    Store.shared.delete(sticky.id)
+                } else {
+                    out.append(Result(label: "left a note alone that was written into during the test",
+                                      ok: true, detail: "kept \(sticky.id)"))
+                }
                 finish(out)
             }
             }
