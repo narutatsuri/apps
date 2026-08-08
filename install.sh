@@ -10,7 +10,7 @@ cd "$(dirname "$0")"
 
 apps=("$@")
 if [ ${#apps[@]} -eq 0 ]; then
-  apps=(CodingAgentUsage Deadlines Jot PaperNotes Pomodoro VoiceBridge)
+  apps=(CodingAgentUsage Jot PaperNotes Pomodoro VoiceBridge)
 fi
 
 for app in "${apps[@]}"; do
