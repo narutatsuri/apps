@@ -1,12 +1,13 @@
 # apps
 
-Five small macOS apps, kept here so they survive this machine and can be rebuilt
+Six small macOS apps, kept here so they survive this machine and can be rebuilt
 anywhere. Each lives in its own folder, is a self-contained Swift Package with
 its own `build.sh` and its own README, and installs to `/Applications`.
 
 | Folder | Installs as | What it does | Its data lives in |
 |---|---|---|---|
 | `CodingAgentUsage/` | Coding Agent Usage.app | Live Claude and Codex usage against plan limits, in the menu bar | — |
+| `Deadlines/` | Deadlines.app | Countdown to conference deadlines, pinned to the desktop below your windows | `~/deadlines/conferences.txt` |
 | `Jot/` | Jot.app | Markdown sticky notes. ⌃⌥Space for a new one; markers disappear as you type them and equations typeset | `~/jot/*.md` |
 | `PaperNotes/` | Paper Notes.app | arXiv reading notes, with Claude grading the notes, appraising papers on the interest of the idea, and recommending new ones | `~/paper-notes/` |
 | `Pomodoro/` | Pomodoro.app | Pomodoro timer with a full-screen break overlay | — |
@@ -21,7 +22,7 @@ writing are separate decisions.
 ```sh
 git clone https://github.com/narutatsuri/apps.git
 cd apps
-./install.sh              # all five
+./install.sh              # all six
 ./install.sh Jot          # or just one
 ```
 
@@ -81,3 +82,10 @@ it after changing an app:
 ./sync.sh                 # copies ~/Developer/* in, minus build output
 git add -A && git commit -m "..." && git push
 ```
+
+## A note on widgets
+
+None of these are WidgetKit widgets. A widget is an app extension — a `.appex`
+with an `NSExtensionPointIdentifier`, embedded in a containing app, signed and
+registered with PlugInKit — and producing one is Xcode`s build system`s job.
+`Deadlines` gets the same effect with a desktop-level window instead.
