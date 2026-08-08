@@ -142,11 +142,21 @@ final class StickyWindow: NSWindowController, NSWindowDelegate {
         Store.shared.save(s, debounce: 1.5)
     }
 
+    /// Set while the app is shutting down, so quitting is not mistaken for
+    /// closing every note by hand.
+    static var isQuitting = false
+
     func windowWillClose(_ notification: Notification) {
         // Closing is not deleting — the note stays on disk and in the menu, and
         // is simply not reopened at launch. Flush after recording that, because
         // whatever was typed last has not been written yet.
-        if var s = Store.shared.sticky(stickyID) {
+        //
+        // Quitting is not closing, though. AppKit closes every window on the
+        // way out, and recording that turned "quit Jot" into "put all my notes
+        // away": they were still on disk, still in the menu, and nowhere on
+        // screen at next launch — the failure that looks exactly like data loss
+        // without being it.
+        if var s = Store.shared.sticky(stickyID), !Self.isQuitting {
             s.isOpen = false
             Store.shared.save(s, debounce: 0)
         }

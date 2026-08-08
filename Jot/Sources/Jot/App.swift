@@ -77,8 +77,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Quitting must not lose the last sentence — the store writes on a debounce.
+    /// Quitting must not lose the last sentence — the store writes on a
+    /// debounce — and must not be mistaken for closing every note by hand.
     func applicationWillTerminate(_ notification: Notification) {
+        StickyWindow.isQuitting = true
         Store.shared.flushAll()
     }
 
@@ -250,9 +252,11 @@ extension AppDelegate: NSMenuDelegate {
         NSWorkspace.shared.open(Store.root)
     }
     @objc func menuQuit() {
+        StickyWindow.isQuitting = true
         Store.shared.flushAll()
         NSApp.terminate(nil)
     }
+
 }
 
 @main
