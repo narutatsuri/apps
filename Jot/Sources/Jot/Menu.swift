@@ -23,7 +23,7 @@ enum MainMenu {
                     action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
                     keyEquivalent: "")
         app.addItem(.separator())
-        add(to: app, "Open ~/jot", #selector(AppDelegate.menuFolder), target)
+        add(to: app, "Open Notes Folder", #selector(AppDelegate.menuFolder), target)
         app.addItem(.separator())
         add(to: app, "Quit Jot", #selector(AppDelegate.menuQuit), target, "q")
         appItem.submenu = app

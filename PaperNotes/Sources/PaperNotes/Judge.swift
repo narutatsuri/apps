@@ -65,7 +65,7 @@ enum Judge {
         // A question about section 5 cannot be answered from the first six pages.
         // The wider excerpt is only paid for when there is something to answer.
         let excerpt = questions.isEmpty
-            ? excerpt(of: paper.pdfPath)
+            ? excerpt(of: paper.resolvedPDF?.path ?? paper.pdfPath)
             : excerpt(of: paper.pdfPath, pages: 25, limit: 90_000)
         guard !excerpt.isEmpty else { return "No PDF text available for this paper." }
 

@@ -58,19 +58,31 @@ struct GraphView: View {
     @State private var gesture = ViewportGesture()
     @State private var magnifyBase: CGFloat = 1
 
+    /// Archived papers are out of the graph unless asked for. Remembered, so
+    /// the choice survives a relaunch — a view setting you have to set again
+    /// every time is one you stop using.
+    @AppStorage("graph.showArchaic") private var showArchaic = false
+
     @State private var hovered: String?
     @State private var scrollMonitor: Any?
     @State private var ticker: Timer?
 
     private var surface: Color { Color(hex: scheme == .dark ? 0x17181C : 0xFBFBFA) }
 
+    /// What the graph is a map of. Everything below reads this rather than
+    /// `model.papers`, so the toggle cannot be honoured in one place and
+    /// forgotten in another.
+    private var shown: [Paper] {
+        showArchaic ? model.papers : model.papers.filter { !$0.archaic }
+    }
+
     private var years: (min: Int, max: Int) {
-        let ys = model.papers.compactMap(\.year)
+        let ys = shown.compactMap(\.year)
         guard let lo = ys.min(), let hi = ys.max() else { return (2020, 2026) }
         return lo == hi ? (lo - 1, hi) : (lo, hi)
     }
 
-    private var maxCitations: Int { max(1, model.papers.map(\.citations).max() ?? 1) }
+    private var maxCitations: Int { max(1, shown.map(\.citations).max() ?? 1) }
 
     var body: some View {
         GeometryReader { geo in
@@ -91,12 +103,14 @@ struct GraphView: View {
                         .onEnded { _ in magnifyBase = scale })
 
                 legend
-                if let hovered, let paper = model.papers.first(where: { $0.arxivID == hovered }) {
+                if let hovered, let paper = shown.first(where: { $0.arxivID == hovered }) {
                     card(paper).padding(.top, 62).padding(.leading, 12)
                 }
                 controls
-                if model.papers.isEmpty {
-                    Text("Add papers and the graph appears here.")
+                if shown.isEmpty {
+                    Text(model.papers.isEmpty
+                         ? "Add papers and the graph appears here."
+                         : "Every paper here is archived. Turn on \"Archived\" to see them.")
                         .font(.system(size: 11)).foregroundStyle(.tertiary)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
@@ -110,6 +124,7 @@ struct GraphView: View {
             .onDisappear { stopTicking(); removeScrollZoom() }
             .onChange(of: geo.size) { _, new in canvas = new; reload(new) }
             .onChange(of: model.papers.count) { _, _ in reload(geo.size, force: true) }
+            .onChange(of: showArchaic) { _, _ in reload(geo.size, force: true) }
         }
         .background(surface)
     }
@@ -172,12 +187,12 @@ struct GraphView: View {
 
     private func reload(_ size: CGSize, force: Bool = false) {
         guard size.width > 80, size.height > 80 else { return }
-        if !force, loadedFor == model.papers.count, !sim.bodies.isEmpty { return }
-        loadedFor = model.papers.count
-        edges = Relations.edges(in: model.papers)
+        if !force, loadedFor == shown.count, !sim.bodies.isEmpty { return }
+        loadedFor = shown.count
+        edges = Relations.edges(in: shown)
         var masses: [String: Double] = [:]
-        for p in model.papers { masses[p.arxivID] = Double(radius(p)) / 8.0 }
-        sim.load(ids: model.papers.map(\.arxivID), edges: edges, masses: masses, size: size)
+        for p in shown { masses[p.arxivID] = Double(radius(p)) / 8.0 }
+        sim.load(ids: shown.map(\.arxivID), edges: edges, masses: masses, size: size)
     }
 
     private func startTicking() {
@@ -328,6 +343,11 @@ struct GraphView: View {
                 Text("drag to pan · scroll to zoom · drag a paper to move it")
                     .font(.system(size: 9)).foregroundStyle(.tertiary)
                 Spacer()
+                Toggle(isOn: $showArchaic) {
+                    Text("Archived").font(.system(size: 10))
+                }
+                .toggleStyle(.checkbox)
+                .help("Include papers marked archaic — older work the reading has moved past")
                 Button { zoom(1.25) } label: { Image(systemName: "plus.magnifyingglass") }
                 Button { zoom(0.8) } label: { Image(systemName: "minus.magnifyingglass") }
                 Button {
@@ -372,7 +392,9 @@ struct GraphView: View {
                     Text("0 – \(maxCitations)").font(.system(size: 8)).foregroundStyle(.secondary)
                 }
             }
-            Text("\(model.papers.count) papers · \(edges.count) connections")
+            Text("\(shown.count) papers · \(edges.count) connections"
+                 + (showArchaic || shown.count == model.papers.count ? ""
+                    : " · \(model.papers.count - shown.count) archived"))
                 .font(.system(size: 9)).foregroundStyle(.tertiary)
         }
         .padding(12)

@@ -106,7 +106,7 @@ enum GradeCache {
     /// input to the prompt; the version pins the prompt itself.
     static func key(for paper: Paper) -> String {
         let size = (try? FileManager.default
-            .attributesOfItem(atPath: paper.pdfPath)[.size] as? Int) ?? 0
+            .attributesOfItem(atPath: paper.resolvedPDF?.path ?? paper.pdfPath)[.size] as? Int) ?? 0
         let material = [promptVersion, paper.arxivID, paper.pdfPath,
                         String(size ?? 0), paper.body].joined(separator: "\u{1}")
         let digest = SHA256.hash(data: Data(material.utf8))

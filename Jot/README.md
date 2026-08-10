@@ -5,7 +5,9 @@ Markdown scratch notes that float over whatever you are working in.
     ⌃⌥Space   new note, focused, ready to type
     ⌃⌥S       show every note, or hide them all
 
-Notes live in `~/jot` as plain markdown, one file each. Grep them, edit one in
+Notes live in `~/Library/Application Support/Jot` as plain markdown, one file
+each — where macOS keeps an app's data, rather than as a folder in your home
+directory. The menu bar icon opens it. Grep them, edit one in
 vim, pipe things into them; the app is a way of looking at that folder, not a
 container the notes are trapped inside.
 
@@ -24,7 +26,7 @@ container the notes are trapped inside.
     ⌘⇧X              strikethrough
     ⌘1…⌘6            colour
     ⌘R               render the markdown / back to editing
-    ⌘⌫               delete (moved to ~/jot/.trash, not gone)
+    ⌘⌫               delete (moved to .trash inside that folder, not gone)
 
 Emphasis writes markdown *into the text* — `**bold**` is stored as `**bold**`
 and drawn bold as you type. That is the difference from the built-in Stickies

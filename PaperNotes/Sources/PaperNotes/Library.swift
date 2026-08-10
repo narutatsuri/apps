@@ -10,8 +10,31 @@ final class Library {
 
     // nonisolated: `Git` is a plain enum with no actor, and these are immutable.
     // Without this they are an error under the Swift 6 language mode.
+    /// `~/Library/Application Support/Paper Notes/`, where macOS keeps an app's
+    /// data — not the home folder, which is yours. Still a git repo of plain
+    /// markdown, so nothing about how you read, grep or push it changes; only
+    /// where it sits. Never inside the `.app` bundle: `build.sh` replaces that
+    /// on every rebuild, which would take the library with it.
     nonisolated static let root = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("paper-notes")
+        .appendingPathComponent("Library/Application Support/Paper Notes")
+
+    /// Where the library used to live.
+    nonisolated private static let legacyRoot = FileManager.default
+        .homeDirectoryForCurrentUser.appendingPathComponent("paper-notes")
+
+    /// Moves the library out of the home folder, once.
+    ///
+    /// A move, not a copy: this is a git repo, and two clones of it with
+    /// different commits would be a genuinely bad afternoon. Only ever done
+    /// when the new location does not already exist.
+    nonisolated static func migrateFromHome() {
+        let manager = FileManager.default
+        guard manager.fileExists(atPath: legacyRoot.path),
+              !manager.fileExists(atPath: root.path) else { return }
+        try? manager.createDirectory(at: root.deletingLastPathComponent(),
+                                     withIntermediateDirectories: true)
+        try? manager.moveItem(at: legacyRoot, to: root)
+    }
     nonisolated static var papersDir: URL { root.appendingPathComponent("papers") }
     /// PDFs live beside the notes but are **git-ignored**. Two reasons: 269 MB of
     /// binaries would wreck a notes repo, and pushing published papers to a repo —
@@ -47,6 +70,7 @@ final class Library {
     private init() {}
 
     func bootstrap() {
+        Self.migrateFromHome()
         defer { TrustedAuthors.bootstrap(); ArxivFeed.bootstrap() }
         let fm = FileManager.default
         try? fm.createDirectory(at: Self.papersDir, withIntermediateDirectories: true)

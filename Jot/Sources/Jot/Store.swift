@@ -2,14 +2,25 @@ import Foundation
 
 /// Every sticky, on disk as plain markdown.
 ///
-/// `~/jot/` rather than Application Support: these are your notes, you
-/// should be able to find them in Finder, grep them, edit one in vim, and back
-/// them up without knowing anything about this app.
+/// `~/Library/Application Support/Jot/`, which is where macOS keeps data that
+/// belongs to an app. Not the home folder — an app has no business putting a
+/// directory next to Documents and Downloads — and emphatically not inside the
+/// `.app` bundle, which is the obvious-sounding place and the one that would
+/// destroy every note: `build.sh` deletes and replaces the bundle on each
+/// rebuild, and writing into a signed bundle breaks its signature.
+///
+/// Still plain markdown, one file per note, so you can grep them, edit one in
+/// vim, and back them up without knowing anything about this app. The menu bar
+/// icon opens the folder, since it is not somewhere you would stumble on.
 @MainActor
 final class Store {
     static let shared = Store()
 
     static let root = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Application Support/Jot")
+
+    /// Where the notes used to live.
+    private static let legacyRoot = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("jot")
     /// Deleted stickies land here rather than vanishing. Deletion has to be one
     /// keystroke for a scratch buffer to be worth using, and one keystroke is
@@ -22,9 +33,31 @@ final class Store {
     private init() {}
 
     func bootstrap() {
+        Self.migrateFromHome()
         try? FileManager.default.createDirectory(at: Self.root, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: Self.trash, withIntermediateDirectories: true)
         reload()
+    }
+
+    /// Moves `~/jot` to Application Support the first time this runs.
+    ///
+    /// A move, not a copy: two folders of notes, one of them stale, is a worse
+    /// outcome than either place on its own. Only ever done when the new
+    /// location does not exist, so it cannot overwrite anything.
+    private static func migrateFromHome() {
+        let manager = FileManager.default
+        guard manager.fileExists(atPath: legacyRoot.path),
+              !manager.fileExists(atPath: root.path) else { return }
+        try? manager.createDirectory(at: root.deletingLastPathComponent(),
+                                     withIntermediateDirectories: true)
+        do {
+            try manager.moveItem(at: legacyRoot, to: root)
+        } catch {
+            // Across volumes, or with the old folder open somewhere, a move can
+            // fail. Copying leaves the original alone, which is the safe half of
+            // the trade — better two copies than none.
+            try? manager.copyItem(at: legacyRoot, to: root)
+        }
     }
 
     func url(for id: String) -> URL {

@@ -12,6 +12,16 @@ import Foundation
 /// It also needs no API call to generate candidates — the references are already
 /// extracted.
 enum Recommender {
+    /// The papers that count as evidence of what to read next.
+    ///
+    /// Archived papers are reading you have moved past, so they are not that
+    /// evidence: left in, a stretch of old cross-lingual work pulls every
+    /// recommendation back toward a field the library has left. Separated out
+    /// so the rule can be tested without spending a minute on the network.
+    static func eligible(_ papers: [Paper], includeArchaic: Bool = false) -> [Paper] {
+        includeArchaic ? papers : papers.filter { !$0.archaic }
+    }
+
     /// Where a suggestion came from. The two sources answer different questions —
     /// "what does my library keep pointing at" and "what have the people I follow
     /// published lately" — and the second reaches papers the first cannot see,

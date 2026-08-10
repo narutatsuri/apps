@@ -90,4 +90,4 @@ if [ "${NO_LAUNCH:-0}" != "1" ]; then
   echo "==> Launching"
   open "/Applications/$APP.app"
 fi
-echo "Done. Notes live in ~/paper-notes (git)."
+echo "Done. Notes live in ~/Library/Application Support/Paper Notes (git)."

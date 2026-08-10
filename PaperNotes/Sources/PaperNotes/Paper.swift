@@ -61,6 +61,17 @@ struct Paper: Identifiable, Equatable {
     /// "more like this" has something concrete to work from.
     var starred: Bool = false
 
+    /// Read, kept, and no longer part of the current picture.
+    ///
+    /// A library accumulates two kinds of paper: the ones you are thinking with
+    /// now, and the ones you read on the way here. Older multilingual-embedding
+    /// and summarization-evaluation work is not less good, it is simply not what
+    /// the graph is a map of — and left in, it dominates the layout and drags
+    /// recommendations toward a field the reading has moved on from. Archived
+    /// papers keep their notes and stay searchable; they are out of the graph and
+    /// out of the recommender unless asked for.
+    var archaic: Bool = false
+
     var id: String { arxivID }
 
     var isQueued: Bool { queuePosition > 0 }
@@ -109,6 +120,42 @@ struct Paper: Identifiable, Equatable {
     }
 
     var filename: String { "\(slug).md" }
+
+    /// When this was published, to the month, for ordering.
+    ///
+    /// The arXiv id carries it — 2507.14805 is July 2025 — which makes it a
+    /// better sort key than the `year` field in two ways: it is a month rather
+    /// than a year, and it exists even when the metadata fetch failed. Three
+    /// papers had no year at all and sorted below a 2016 paper as a result,
+    /// which is the kind of wrong that looks like the list is simply broken.
+    ///
+    /// Old-style ids (cs/0601001) carry no date, so those fall back to `year`.
+    var published: (year: Int, month: Int) {
+        let digits = arxivID.prefix { $0.isNumber }
+        if digits.count == 4, arxivID.dropFirst(4).first == ".",
+           let yy = Int(digits.prefix(2)), let mm = Int(digits.suffix(2)),
+           (1...12).contains(mm) {
+            return (2000 + yy, mm)
+        }
+        return (year ?? 0, 0)
+    }
+
+    /// The PDF, wherever it actually is.
+    ///
+    /// `pdfPath` is stored absolute, which was fine until the library moved out
+    /// of the home folder and every one of them pointed at a directory that no
+    /// longer existed — sixty-four notes that had quietly lost their papers.
+    /// The store is content-addressed by arXiv id, so the recorded path is only
+    /// a hint: if it is gone, look for the file where it would be now.
+    var resolvedPDF: URL? {
+        let manager = FileManager.default
+        if !pdfPath.isEmpty, manager.fileExists(atPath: pdfPath) {
+            return URL(fileURLWithPath: pdfPath)
+        }
+        let expected = Library.pdfStore
+            .appendingPathComponent("\(PDFRefs.normalise(arxivID)).pdf")
+        return manager.fileExists(atPath: expected.path) ? expected : nil
+    }
 
     /// A note counts as written only once there is prose that isn't scaffolding.
     var isSubstantive: Bool {
@@ -214,6 +261,7 @@ extension Paper {
         if !pdfPath.isEmpty { out += "pdf: \(pdfPath)\n" }
         if citations > 0 { out += "cited: \(citations)\n" }
         if starred { out += "starred: true\n" }
+        if archaic { out += "archaic: true\n" }
         if queuePosition > 0 { out += "queue: \(queuePosition)\n" }
         out += "---\n\n"
         out += body.hasSuffix("\n") ? body : body + "\n"
@@ -256,6 +304,7 @@ extension Paper {
         self.pdfPath = front["pdf"] ?? ""
         self.citations = front["cited"].flatMap(Int.init) ?? 0
         self.starred = (front["starred"] ?? "") == "true"
+        self.archaic = (front["archaic"] ?? "") == "true"
         self.queuePosition = front["queue"].flatMap(Int.init) ?? -1
         self.body = lines[(close + 1)...].joined(separator: "\n")
             .trimmingCharacters(in: .newlines)

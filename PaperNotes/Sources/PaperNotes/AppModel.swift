@@ -279,7 +279,7 @@ final class AppModel {
     /// Opens the PDF for reading and gets the two windows onto different screens.
     func startReading(_ paper: Paper) {
         guard !paper.pdfPath.isEmpty else { return }
-        Reading.openPDF(paper.pdfPath)
+        Reading.openPDF(paper.resolvedPDF?.path ?? paper.pdfPath)
         // Preview needs a moment to put a window on screen before we can tell
         // which display to avoid.
         Task {

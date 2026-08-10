@@ -225,7 +225,18 @@ enum Commands {
     static func recommend(_ args: [String]) -> Never {
         let limit = args.first.flatMap(Int.init) ?? 15
         MainActor.assumeIsolated { Library.shared.bootstrap() }
-        let library = MainActor.assumeIsolated { Library.shared.papers }
+        let all = MainActor.assumeIsolated { Library.shared.papers }
+        // Archived papers are the reading you have moved past, so they are not
+        // evidence of what to read next: left in, a stretch of old multilingual
+        // work pulls every recommendation back toward it. `--archaic` puts them
+        // back for a run.
+        let includeArchaic = args.contains("--archaic")
+        let library = Recommender.eligible(all, includeArchaic: includeArchaic)
+        let skipped = all.count - library.count
+        if skipped > 0 {
+            print("(\(skipped) archived paper\(skipped == 1 ? "" : "s") left out — "
+                  + "pass --archaic to include them)")
+        }
         guard !library.isEmpty else { print("Library is empty."); exit(1) }
 
         // Four sources, each answering a different question. Measured on this

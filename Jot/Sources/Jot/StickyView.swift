@@ -150,7 +150,7 @@ struct StickyView: View {
                 Image(systemName: "trash").font(.system(size: 10))
             }
             .buttonStyle(.plain)
-            .help("Delete (⌘⌫) — moved to ~/jot/.trash, not gone")
+            .help("Delete (⌘⌫) — moved to the notes folder's .trash, not gone")
         }
         .foregroundStyle(ink.opacity(0.55))
         .padding(.horizontal, 10)

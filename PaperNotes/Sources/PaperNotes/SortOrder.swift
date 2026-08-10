@@ -22,8 +22,13 @@ enum SortOrder: String, CaseIterable, Identifiable {
     static func apply(_ order: SortOrder, to papers: [Paper]) -> [Paper] {
         switch order {
         case .published:
-            // Undated papers sink rather than floating to the top on a nil year.
-            return papers.sorted { ($0.year ?? 0, $0.arxivID) > ($1.year ?? 0, $1.arxivID) }
+            // From the arXiv id, so the order is by month and survives a paper
+            // whose metadata never arrived — sorting those to the bottom put
+            // 2025 papers below 2016 ones.
+            return papers.sorted {
+                ($0.published.year, $0.published.month, $0.arxivID)
+                    > ($1.published.year, $1.published.month, $1.arxivID)
+            }
         case .added:
             return papers.sorted { ($0.readOn ?? .distantPast) > ($1.readOn ?? .distantPast) }
         case .interest:
@@ -38,7 +43,7 @@ enum SortOrder: String, CaseIterable, Identifiable {
                 if ar != br { return ar < br }
                 let l = interestRank(a), r = interestRank(b)
                 if l != r { return l < r }
-                return (a.year ?? 0, a.arxivID) > (b.year ?? 0, b.arxivID)
+                return (a.published.year, a.published.month) > (b.published.year, b.published.month)
             }
         case .queue:
             // Queued papers in queue order, then everything else by interest —
@@ -50,7 +55,7 @@ enum SortOrder: String, CaseIterable, Identifiable {
                 case (false, true): return false
                 case (false, false):
                     let l = interestRank(a), r = interestRank(b)
-                    return l == r ? (a.year ?? 0) > (b.year ?? 0) : l < r
+                    return l == r ? a.published > b.published : l < r
                 }
             }
         case .citations:

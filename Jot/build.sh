@@ -62,4 +62,4 @@ cp -R "$BUNDLE" "/Applications/$APP.app"
 
 echo "==> Launching"
 open -a "/Applications/$APP.app"
-echo "Done. Notes live in ~/jot as plain markdown."
+echo "Done. Notes live in ~/Library/Application Support/Jot as plain markdown."

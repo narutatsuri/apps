@@ -1,7 +1,8 @@
 # Paper Notes
 
 Reading notes for papers, with a citation graph as the spine. Notes are markdown in
-a git repo you own (`~/paper-notes` → `github.com/narutatsuri/paper-notes`); the app
+a git repo you own (`~/Library/Application Support/Paper Notes` →
+`github.com/narutatsuri/paper-notes`); the app
 is a lens over those files, never their owner.
 
 Built 2026-08-04.

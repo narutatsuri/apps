@@ -7,14 +7,17 @@ its own `build.sh` and its own README, and installs to `/Applications`.
 | Folder | Installs as | What it does | Its data lives in |
 |---|---|---|---|
 | `CodingAgentUsage/` | Coding Agent Usage.app | Live Claude and Codex usage against plan limits, in the menu bar | — |
-| `Jot/` | Jot.app | Markdown sticky notes. ⌃⌥Space for a new one; markers disappear as you type them and equations typeset | `~/jot/*.md` |
-| `PaperNotes/` | Paper Notes.app | arXiv reading notes, with Claude grading the notes, appraising papers on the interest of the idea, and recommending new ones | `~/paper-notes/` |
+| `Jot/` | Jot.app | Markdown sticky notes. ⌃⌥Space for a new one; markers disappear as you type them and equations typeset | `~/Library/Application Support/Jot` |
+| `PaperNotes/` | Paper Notes.app | arXiv reading notes, with Claude grading the notes, appraising papers on the interest of the idea, and recommending new ones | `~/Library/Application Support/Paper Notes` |
 | `Pomodoro/` | Pomodoro.app | Pomodoro timer with a full-screen break overlay | — |
 | `VoiceBridge/` | VoiceBridge.app | Double-tap Control to dictate into the current iTerm2 session, and so into remote tmux over SSH | `~/Library/Application Support/VoiceBridge` |
 
-Notes and papers are deliberately **not** in this repo — the apps keep their data
-in the home directory, in plain files, so backing up the code and backing up the
-writing are separate decisions.
+Notes and papers are deliberately **not** in this repo. Each app keeps its data
+in `~/Library/Application Support/<App>`, in plain files — where macOS expects an
+app's data, rather than as another folder in the home directory. Never inside the
+`.app` bundle: `build.sh` replaces that on every rebuild, which would take the
+data with it. Backing up the code and backing up the writing stay separate
+decisions.
 
 ## Building on a fresh machine
 
@@ -74,7 +77,8 @@ open -n -a Jot --env JOT_KEYTEST=1 --env JOT_KEYTEST_OUT=/tmp/jot-keytest.txt
 
 ## Keeping this repo current
 
-The working copies live in `~/Developer/<App>`; this repo is a mirror. To refresh
+The working copies live in `~/Developer/<App>`; this repo is a mirror, checked
+out at `~/Developer/apps`. To refresh
 it after changing an app:
 
 ```sh

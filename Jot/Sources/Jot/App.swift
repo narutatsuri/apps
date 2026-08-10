@@ -198,7 +198,7 @@ extension AppDelegate: NSMenuDelegate {
         menu.addItem(theme)
 
         menu.addItem(.separator())
-        let folder = NSMenuItem(title: "Open ~/jot", action: #selector(menuFolder),
+        let folder = NSMenuItem(title: "Open Notes Folder", action: #selector(menuFolder),
                                 keyEquivalent: "")
         folder.target = self
         menu.addItem(folder)

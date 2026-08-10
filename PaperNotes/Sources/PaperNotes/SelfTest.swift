@@ -57,6 +57,46 @@ enum SelfTest {
               back.confusions == "Why the proxy correlates at all.",
               "headings still locate their text")
         check("round-trip: pdf path", back.pdfPath == p.pdfPath)
+
+        // --- archived papers
+        var archived = Paper(arxivID: "2010.06189")
+        archived.archaic = true
+        let archivedBack = Paper(markdown: archived.markdown)
+        check("round-trip: archaic", archivedBack?.archaic == true)
+        check("a paper is not archaic unless it says so",
+              Paper(markdown: Paper(arxivID: "2507.14805").markdown)?.archaic == false)
+
+        // --- publication order
+        //
+        // The date comes from the arXiv id, which carries the month and exists
+        // even when the metadata fetch failed. Three papers had no year at all
+        // and sorted below a 2016 paper, which reads as a broken list.
+        check("the month comes out of the arXiv id",
+              Paper(arxivID: "2507.14805").published == (2025, 7),
+              "got \(Paper(arxivID: "2507.14805").published)")
+        check("an old-style id falls back to the year field", {
+            var old = Paper(arxivID: "cs/0601001"); old.year = 2006
+            return old.published == (2006, 0)
+        }())
+        var undated = Paper(arxivID: "2507.14805")      // no year field at all
+        var older = Paper(arxivID: "1611.04231")
+        older.year = 2016
+        let ordered = SortOrder.apply(.published, to: [older, undated])
+        check("a 2025 paper with no year still sorts above a 2016 one",
+              ordered.first?.arxivID == "2507.14805",
+              "a missing year used to sink it to the bottom of the library")
+        var june = Paper(arxivID: "2506.21734"); june.year = 2025
+        var sept = Paper(arxivID: "2509.25123"); sept.year = 2025
+        var live = Paper(arxivID: "2509.25123")
+        var shelved = Paper(arxivID: "1710.04087"); shelved.archaic = true
+        check("recommendations ignore archived papers",
+              Recommender.eligible([live, shelved]).map(\.arxivID) == ["2509.25123"],
+              "old cross-lingual work would otherwise drag every suggestion toward it")
+        check("unless asked for",
+              Recommender.eligible([live, shelved], includeArchaic: true).count == 2)
+
+        check("within a year, ordering is by month",
+              SortOrder.apply(.published, to: [june, sept]).first?.arxivID == "2509.25123")
         check("template is not mistaken for a note",
               !Paper(arxivID: "1234.5678").isSubstantive,
               "an untouched template counts as unread")
