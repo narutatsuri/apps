@@ -191,6 +191,28 @@ extension Concept {
         }
     }
 
+    /// The concept as one markdown document — heading, the one-line reason it
+    /// is on the list, and the entry — so a single renderer typesets all of it.
+    /// Shared by the reading pane and `--render`, so what the check renders is
+    /// exactly what the pane shows.
+    func document(preferWalkthrough: Bool) -> String {
+        var out = "# " + title + "\n\n"
+        if !relevance.isEmpty { out += "*" + relevance + "*\n\n" }
+        if !courses.isEmpty {
+            out += "<div class=\"cite\">taught by " + courses.joined(separator: " · ") + "</div>\n\n"
+        }
+        out += (preferWalkthrough && !walkthrough.isEmpty) ? walkthrough : body
+        if !sources.isEmpty {
+            out += "\n\n## Sources\n\n"
+            for source in sources {
+                let mark = source.reachable == false ? " — **link does not resolve**"
+                         : (source.reachable == true ? "" : " — unchecked")
+                out += "- [\(source.title)](\(source.url))\(mark)\n"
+            }
+        }
+        return out
+    }
+
     /// LaTeX flattened to readable text, for the places that cannot typeset it.
     ///
     /// A sidebar row and a graph label are drawn by AppKit, not by KaTeX, so

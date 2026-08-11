@@ -27,6 +27,7 @@ struct ConceptPreview: NSViewRepresentable {
             return view
         }
         // Read access to the enclosing directory, so katex.min.js and the fonts resolve.
+        context.coordinator.page = html
         view.loadFileURL(html, allowingReadAccessTo: html.deletingLastPathComponent())
         return view
     }
@@ -54,6 +55,7 @@ struct ConceptPreview: NSViewRepresentable {
 
     final class Coordinator: NSObject, WKNavigationDelegate {
         var pending: String = ""
+        var page: URL?
         private var ready = false
         private weak var view: WKWebView?
 
@@ -61,6 +63,16 @@ struct ConceptPreview: NSViewRepresentable {
             ready = true
             view = webView
             flush(into: webView)
+        }
+
+        /// WebKit's content process can die out from under the view — under
+        /// memory pressure, or a GPU hiccup — and what that looks like on
+        /// screen is the reading pane going permanently, silently blank.
+        /// Reload the page; didFinish then replays the pending document.
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            ready = false
+            guard let page else { return }
+            webView.loadFileURL(page, allowingReadAccessTo: page.deletingLastPathComponent())
         }
 
         /// Held until the page has loaded, otherwise the first keystrokes are lost.

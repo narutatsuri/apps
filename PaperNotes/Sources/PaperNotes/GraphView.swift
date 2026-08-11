@@ -255,6 +255,9 @@ struct GraphView: View {
         let neighbours: Set<String> = focus.map { id in
             Set(edges.filter { $0.0 == id || $0.1 == id }.flatMap { [$0.0, $0.1] })
         } ?? []
+        // One dictionary, not a linear scan per node per frame — the sibling
+        // Frontier graph showed where that road ends once the node count grows.
+        let byID = Dictionary(uniqueKeysWithValues: model.papers.map { ($0.arxivID, $0) })
 
         for (a, b, weight) in edges {
             guard let pa = sim.position(a), let pb = sim.position(b) else { continue }
@@ -269,7 +272,7 @@ struct GraphView: View {
         }
 
         for (id, body) in sim.bodies {
-            guard let paper = model.papers.first(where: { $0.arxivID == id }) else { continue }
+            guard let paper = byID[id] else { continue }
             let r = radius(paper)
             let rect = CGRect(x: body.position.x - r, y: body.position.y - r,
                               width: r * 2, height: r * 2)
@@ -299,7 +302,7 @@ struct GraphView: View {
         // with the hovered and selected node always winning.
         var claimed: [CGRect] = []
         let ordered = sim.bodies.compactMap { id, body -> (Paper, CGPoint)? in
-            guard let paper = model.papers.first(where: { $0.arxivID == id }) else { return nil }
+            guard let paper = byID[id] else { return nil }
             return (paper, body.position)
         }.sorted { lhs, rhs in
             let lp = lhs.0.arxivID == focus || lhs.0.arxivID == selected

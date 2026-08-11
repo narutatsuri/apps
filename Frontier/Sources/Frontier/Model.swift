@@ -10,14 +10,22 @@ final class Model: ObservableObject {
     /// reason it could not run.
     @Published var note: String?
 
+    /// Stored, not computed. These walk the whole dependency graph (~9 ms at
+    /// 275 concepts, measured with --bench), and as computed properties the
+    /// sidebar recomputed them for every row of every body evaluation — a
+    /// hundred milliseconds per click. Statuses only change through this
+    /// class, so recomputing on load() is both cheaper and still correct.
+    @Published private(set) var session: [Concept] = []
+    @Published private(set) var ready: [Concept] = []
+
     func load() {
         Store.shared.bootstrap()
         concepts = Store.shared.concepts
+        session = Frontier.session(concepts)
+        ready = Frontier.ready(concepts)
         if selected == nil { selected = session.first?.id }
     }
 
-    var session: [Concept] { Frontier.session(concepts) }
-    var ready: [Concept] { Frontier.ready(concepts) }
     var current: Concept? { selected.flatMap { id in concepts.first { $0.id == id } } }
 
     func mark(_ concept: Concept, _ status: Concept.Status) {

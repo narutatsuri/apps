@@ -23,6 +23,41 @@ struct ConceptGraphView: View {
     @State private var scrollMonitor: Any?
     @State private var loadedFor = 0
 
+    /// Derived graph data, cached across frames.
+    ///
+    /// The Canvas redraws sixty times a second while the simulation settles, and
+    /// this used to be recomputed inside the *node loop* of every frame —
+    /// measured with --bench at 275 concepts, one frame cost 2,511 ms, which is
+    /// "clicking the graph button overloads the PC" stated precisely. Statuses
+    /// and edges cannot change while the graph is on screen (marking happens in
+    /// the reading pane), so refreshing on appear and on concept-count change is
+    /// both correct and ~0 per frame.
+    @State private var unlockCounts: [String: Int] = [:]
+    @State private var readyIDs: Set<String> = []
+    @State private var importanceRank: [String: Int] = [:]   // 0 = biggest bottleneck
+    @State private var dependantsMap: [String: [String]] = [:]
+
+    private func refreshDerived() {
+        unlockCounts = Frontier.unlocks(model.concepts)
+        readyIDs = Set(Frontier.ready(model.concepts).map(\.id))
+        let ranked = model.concepts.sorted {
+            let l = unlockCounts[$0.id] ?? 0, r = unlockCounts[$1.id] ?? 0
+            return l == r ? $0.id < $1.id : l > r
+        }
+        importanceRank = Dictionary(uniqueKeysWithValues:
+            ranked.enumerated().map { ($0.element.id, $0.offset) })
+        var dependants: [String: [String]] = [:]
+        for c in model.concepts {
+            for r in c.requires { dependants[r, default: []].append(c.id) }
+        }
+        dependantsMap = dependants
+    }
+
+    /// How many nodes are drawn in full at this zoom. The graph simplifies
+    /// itself when zoomed out — the bottlenecks and anything actionable stay,
+    /// the long tail becomes specks — and fills back in as you zoom.
+    private var detailBudget: Int { max(30, Int(80 * scale * scale)) }
+
     private var surface: Color { Color(nsColor: scheme == .dark ? .init(srgbRed: 0.09, green: 0.09, blue: 0.11, alpha: 1) : .init(srgbRed: 0.98, green: 0.98, blue: 0.97, alpha: 1)) }
 
     private var edges: [(String, String, Double)] {
@@ -59,10 +94,10 @@ struct ConceptGraphView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
-            .onAppear { canvas = geo.size; reload(geo.size); startTicking(); installScrollZoom() }
+            .onAppear { refreshDerived(); canvas = geo.size; reload(geo.size); startTicking(); installScrollZoom() }
             .onDisappear { ticker?.invalidate(); ticker = nil; removeScrollZoom() }
             .onChange(of: geo.size) { _, new in canvas = new; reload(new) }
-            .onChange(of: model.concepts.count) { _, _ in reload(geo.size, force: true) }
+            .onChange(of: model.concepts.count) { _, _ in refreshDerived(); reload(geo.size, force: true) }
         }
         .background(surface)
     }
@@ -74,10 +109,9 @@ struct ConceptGraphView: View {
         if !force, loadedFor == model.concepts.count, !sim.bodies.isEmpty { return }
         loadedFor = model.concepts.count
         var masses: [String: Double] = [:]
-        let unlocks = Frontier.unlocks(model.concepts)
         // Heavier where more rests on it, so bottlenecks settle near the middle
         // and the graph reads outward from its foundations.
-        for c in model.concepts { masses[c.id] = 1 + Double(unlocks[c.id] ?? 0) }
+        for c in model.concepts { masses[c.id] = 1 + Double(unlockCounts[c.id] ?? 0) }
         sim.load(ids: model.concepts.map(\.id), edges: edges, masses: masses, size: size)
     }
 
@@ -156,7 +190,29 @@ struct ConceptGraphView: View {
 
     private func draw(in context: GraphicsContext, size: CGSize) {
         let byID = Dictionary(uniqueKeysWithValues: model.concepts.map { ($0.id, $0) })
-        let ready = Set(Frontier.ready(model.concepts).map(\.id))
+        let ready = readyIDs
+
+        // Once per frame, not per node — the per-node version of this is the
+        // 2.5-second frame --bench measured.
+        let neighbours: Set<String> = hovered.map { h in
+            Set((byID[h]?.requires ?? []) + (dependantsMap[h] ?? []))
+        } ?? []
+
+        // Level of detail. Zoomed out, the graph simplifies itself: the biggest
+        // bottlenecks and everything actionable — ready, started, known, under
+        // the pointer — draw in full, and the long tail is a speck field that
+        // keeps the shape without the noise. Zooming in raises the budget until
+        // everything is back.
+        let budget = detailBudget
+        var detailed: Set<String> = []
+        for id in sim.bodies.keys {
+            guard let c = byID[id] else { continue }
+            if c.status != .unread || ready.contains(id)
+                || id == hovered || neighbours.contains(id) || id == model.selected
+                || (importanceRank[id] ?? .max) < budget {
+                detailed.insert(id)
+            }
+        }
 
         for (from, to, _) in edges {
             guard let a = sim.bodies[from]?.position, let b = sim.bodies[to]?.position else { continue }
@@ -164,7 +220,12 @@ struct ConceptGraphView: View {
             path.move(to: screen(a, in: size))
             path.addLine(to: screen(b, in: size))
             // An edge into something you know is settled; one into something you
-            // do not is the part of the map still to walk.
+            // do not is the part of the map still to walk. An edge with a speck
+            // on either end is only a hint of structure.
+            guard detailed.contains(from), detailed.contains(to) else {
+                context.stroke(path, with: .color(.secondary.opacity(0.05)), lineWidth: 0.5)
+                continue
+            }
             let solid = byID[to]?.isKnown == true
             context.stroke(path, with: .color(.secondary.opacity(solid ? 0.35 : 0.14)),
                            lineWidth: solid ? 1 : 0.7)
@@ -173,7 +234,14 @@ struct ConceptGraphView: View {
         for (id, body) in sim.bodies {
             guard let c = byID[id] else { continue }
             let p = screen(body.position, in: size)
-            let r = 5 + min(9, sqrt(Double(Frontier.unlocks(model.concepts)[id] ?? 0)) * 3)
+
+            guard detailed.contains(id) else {
+                let dot = CGRect(x: p.x - 1.5, y: p.y - 1.5, width: 3, height: 3)
+                context.fill(Path(ellipseIn: dot), with: .color(.secondary.opacity(0.22)))
+                continue
+            }
+
+            let r = 5 + min(9, sqrt(Double(unlockCounts[id] ?? 0)) * 3)
             let box = CGRect(x: p.x - r, y: p.y - r, width: r * 2, height: r * 2)
             switch c.status {
             case .known:
@@ -193,10 +261,6 @@ struct ConceptGraphView: View {
             // whatever it depends on — and the rest of the graph stays shape
             // until you zoom into it. Forty labels at once is a wall of text
             // with a graph hidden behind it.
-            let neighbours = hovered.map { h in
-                Set((byID[h]?.requires ?? []) + model.concepts.filter {
-                    $0.requires.contains(h) }.map(\.id))
-            } ?? []
             let named = id == hovered || neighbours.contains(id)
                 || ready.contains(id) || c.isKnown || scale > 1.6
             if named {
@@ -250,6 +314,13 @@ struct ConceptGraphView: View {
                 }
             }
             Spacer()
+            // Told, not discovered: when the zoom level is hiding detail, the
+            // legend says so, so a field of specks reads as "zoom in" rather
+            // than "broken".
+            if detailBudget < model.concepts.count {
+                Text("simplified — zoom in for the rest")
+                    .font(.system(size: 9)).foregroundStyle(.tertiary)
+            }
             Text("\(model.concepts.count) concepts · \(edges.count) prerequisites")
                 .font(.system(size: 9)).foregroundStyle(.tertiary)
         }

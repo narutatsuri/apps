@@ -78,12 +78,16 @@ struct ContentView: View {
     // MARK: - Sidebar
 
     private var sidebar: some View {
-        List(selection: $model.selected) {
+        // One membership set, not a nested `session` recomputation per row —
+        // that pattern cost ~100 ms per click once the graph reached 275
+        // concepts, because session walks the whole dependency graph.
+        let todayIDs = Set(model.session.map(\.id))
+        return List(selection: $model.selected) {
             Section("Today") {
                 ForEach(model.session) { row($0) }
             }
             Section("Ready — \(model.ready.count)") {
-                ForEach(model.ready.filter { c in !model.session.contains { $0.id == c.id } }
+                ForEach(model.ready.filter { !todayIDs.contains($0.id) }
                             .prefix(20)) { row($0) }
             }
             Section("Known — \(model.concepts.filter(\.isKnown).count)") {
@@ -262,25 +266,10 @@ struct ContentView: View {
         }
     }
 
-    /// The concept as one markdown document, so a single renderer typesets all
-    /// of it — heading, the one-line reason it is on the list, and the entry.
+    /// The shared builder lives on Concept, so `--render` checks exactly what
+    /// this pane shows.
     private func document(_ c: Concept) -> String {
-        var out = "# " + c.title + "\n\n"
-        if !c.relevance.isEmpty { out += "*" + c.relevance + "*\n\n" }
-        if !c.courses.isEmpty {
-            out += "<div class=\"cite\">taught by " + c.courses.joined(separator: " · ") + "</div>\n\n"
-        }
-        let chosen = (walkedThrough && !c.walkthrough.isEmpty) ? c.walkthrough : c.body
-        out += chosen
-        if !c.sources.isEmpty {
-            out += "\n\n## Sources\n\n"
-            for source in c.sources {
-                let mark = source.reachable == false ? " — **link does not resolve**"
-                         : (source.reachable == true ? "" : " — unchecked")
-                out += "- [\(source.title)](\(source.url))\(mark)\n"
-            }
-        }
-        return out
+        c.document(preferWalkthrough: walkedThrough)
     }
 
     private var empty: some View {

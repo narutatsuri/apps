@@ -154,6 +154,19 @@ Known limitation: a multi-page web book with no llms-full.txt imports only the
 page given — use its PDF. Also fixed: title-bar double-click now zooms
 (NSToolbarTitleView was swallowing it; measured with FRONTIER_ZOOMTEST=1).
 
+At 275 concepts the graph view collapsed: draw() recomputed the whole-graph
+downstream-cone BFS *per node per frame* — `--bench` measured one Canvas frame
+at 2,511 ms against ~0 cached — which pinned the machine and blanked the
+window. Derived data (unlocks, ready, importance rank) is now cached per
+graph-change, the sidebar no longer recomputes `session` per row (Model stores
+session/ready), and the graph renders level-of-detail: bottlenecks and
+anything actionable in full, the tail as specks, budget rising with zoom²
+("simplified — zoom in for the rest" in the legend). `--render <id|all>`
+pushes any concept through the real bundled renderer headlessly — all 275
+render — and the reading pane reloads itself if WebKit's content process dies
+instead of sitting blank. PaperNotes' copy of the graph got the smaller
+matching fix (dictionary lookups, not per-node linear scans).
+
 Open:
 - **Most concepts unwritten.** The corpus is mostly empty until entries are
   generated; each takes ~70s.

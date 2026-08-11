@@ -1,4 +1,6 @@
+import AppKit
 import Foundation
+import WebKit
 
 @MainActor
 enum CLI {
@@ -24,6 +26,8 @@ enum CLI {
         if args.contains("--verify") { verify() }
         if args.contains("--next") { next() }
         if args.contains("--status") { status() }
+        if args.contains("--bench") { bench() }
+        if let i = args.firstIndex(of: "--render"), i + 1 < args.count { render(args[i + 1]) }
     }
 
     /// Reads a scratch file of half-understood terms and turns it into a graph.
@@ -225,6 +229,93 @@ enum CLI {
     }
 
     static func status() -> Never { report(); exit(0) }
+
+    /// `--render <id|all>` — push a concept's document through the real bundled
+    /// renderer, offscreen, and report whether anything comes out.
+    ///
+    /// "The pane went blank when I clicked X" is a claim about one concept's
+    /// content meeting the renderer; this answers it for every concept in
+    /// seconds, without clicking 275 times. Renders are serialised — one web
+    /// view, one DOM, and two concurrent renders race (a known gotcha).
+    static func render(_ target: String) -> Never {
+        let all = Store.shared.concepts
+        let subjects = target.lowercased() == "all" ? all : all.filter { $0.id == target }
+        guard !subjects.isEmpty else { print("no concept: \(target)"); exit(1) }
+        guard let html = Bundle.main.url(forResource: "render", withExtension: "html",
+                                         subdirectory: "web") else {
+            print("render.html is not in this build — run the installed app's binary"); exit(1)
+        }
+        let verbose = subjects.count == 1
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)
+        let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 700, height: 500))
+        web.loadFileURL(html, allowingReadAccessTo: html.deletingLastPathComponent())
+
+        var i = 0, failures = 0
+        func step(retry: Int = 0) {
+            if i == subjects.count {
+                print(failures == 0
+                      ? "all \(subjects.count) concepts render"
+                      : "\(failures) of \(subjects.count) FAILED to render")
+                exit(failures == 0 ? 0 : 1)
+            }
+            let c = subjects[i]
+            let doc = c.document(preferWalkthrough: false)
+            let json = String(data: (try? JSONSerialization.data(withJSONObject: [doc]))
+                                ?? Data(), encoding: .utf8) ?? "[\"\"]"
+            web.evaluateJavaScript(
+                "window.renderMarkdown ? (renderMarkdown(\(json)[0]), "
+                + "document.getElementById('out').innerHTML.length) : -1") { value, error in
+                let n = (value as? Int) ?? -2
+                if n == -1 {           // page still loading; wait, do not advance
+                    guard retry < 100 else { print("renderer never became ready"); exit(1) }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { step(retry: retry + 1) }
+                    return
+                }
+                if let error {
+                    failures += 1
+                    print("  ✗ \(c.id) — \(error.localizedDescription)")
+                } else if n <= 0 {
+                    failures += 1
+                    print("  ✗ \(c.id) — rendered to nothing")
+                } else if verbose {
+                    print("  ✓ \(c.id) — \(n) chars of HTML")
+                }
+                i += 1
+                step()
+            }
+        }
+        DispatchQueue.main.async { step() }
+        app.run()
+        exit(failures == 0 ? 0 : 1)
+    }
+
+    /// `--bench` — how long the graph mathematics takes on the *real* store.
+    ///
+    /// Exists because "the graph overloads the PC" is a claim about milliseconds,
+    /// and milliseconds are measurable. The draw-loop number is what one Canvas
+    /// frame used to cost when every node recomputed the downstream cones.
+    static func bench() -> Never {
+        let all = Store.shared.concepts
+        func time(_ label: String, _ runs: Int = 1, _ work: () -> Void) {
+            let t0 = DispatchTime.now().uptimeNanoseconds
+            for _ in 0..<runs { work() }
+            let ms = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6 / Double(runs)
+            print(String(format: "  %-46s %8.2f ms", (label as NSString).utf8String!, ms))
+        }
+        print("\(all.count) concepts")
+        time("Frontier.unlocks, once", 5) { _ = Frontier.unlocks(all) }
+        time("Frontier.ready, once", 5) { _ = Frontier.ready(all) }
+        time("Frontier.session, once", 5) { _ = Frontier.session(all) }
+        time("one graph frame, old draw (unlocks per node)") {
+            for _ in all { _ = Frontier.unlocks(all) }
+        }
+        time("one graph frame, cached (lookups only)") {
+            let unlocks = Frontier.unlocks(all)
+            for c in all { _ = unlocks[c.id] }
+        }
+        exit(0)
+    }
 
     static func report() {
         let all = Store.shared.concepts
