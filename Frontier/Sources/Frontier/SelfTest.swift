@@ -137,6 +137,72 @@ enum SelfTest {
         check("a small graph still fills the session",
               Frontier.session([make("only")], size: 3).count == 1)
 
+        // --- importing a resource: the text machinery, which must not eat chapters
+        let bookText = """
+        # The Book Full Text
+
+        # Chapter One
+
+        Real prose, long enough to count as a chapter body for this test.
+
+        ```python
+        # a Python comment is not a chapter heading
+        x = 1
+        ```
+
+        More prose after the code block.
+
+        # Chapter Two
+
+        The second chapter's text lives here.
+        """
+        let chapters = Resource.markdownSections(bookText)
+        check("markdown chapters split at top-level headings",
+              chapters.map(\.title) == ["The Book Full Text", "Chapter One", "Chapter Two"],
+              "got \(chapters.map(\.title))")
+        check("a # comment inside a code fence is not a chapter",
+              chapters.count == 3
+                && chapters[1].text.contains("a Python comment is not a chapter heading")
+                && chapters[1].text.contains("More prose after the code block"),
+              "the RLHF book's training-code listings are full of them")
+
+        let filler = String(repeating: "the mechanism, spelled out at length. ", count: 6)
+        let post = """
+        <html><head><title>Policy Optimization</title></head><body>
+        <nav><a href="/">navigation chrome that must not survive</a></nav>
+        <h1>Policy Optimization</h1>
+        <p>intro paragraph</p>
+        <h3 id="a">From PPO to GRPO</h3><p>why clipping matters. \(filler)</p>
+        <h3 id="b">GRPO</h3><p>\(filler)</p>
+        <h3 id="c">DAPO</h3><p>\(filler)</p>
+        </body></html>
+        """
+        let posts = Resource.htmlSections(post)
+        check("a page splits at whichever heading level it actually uses",
+              posts.map(\.title) == ["From PPO to GRPO", "GRPO", "DAPO"],
+              "one h1 and one h2 is a title and a box, not an organisation — got \(posts.map(\.title))")
+        check("section text is the text under the heading",
+              posts.first?.text.contains("why clipping matters") == true)
+        check("navigation chrome does not survive into sections",
+              !posts.contains { $0.text.contains("navigation chrome") })
+        check("the page title is read", Resource.pageTitle(post) == "Policy Optimization")
+
+        let tiny = [Resource.Section(title: "A", text: String(repeating: "a", count: 900)),
+                    Resource.Section(title: "B", text: String(repeating: "b", count: 900)),
+                    Resource.Section(title: "C", text: String(repeating: "c", count: 900))]
+        check("small sections share one model call",
+              Resource.batches(tiny, cap: 26_000).count == 1)
+        let huge = [Resource.Section(
+            title: "Big",
+            text: Array(repeating: String(repeating: "x", count: 900), count: 40)
+                .joined(separator: "\n\n"))]
+        let parts = Resource.batches(huge, cap: 10_000)
+        check("a chapter too big for one call is split, in order, labelled",
+              parts.count >= 3 && parts[1].first?.title.contains("part") == true,
+              "got \(parts.count) batches, second titled \(parts[1].first?.title ?? "-")")
+        check("no batch exceeds the cap",
+              parts.allSatisfy { $0.reduce(0) { $0 + $1.text.count } <= 10_000 })
+
         // --- the reading pane actually typesets the mathematics
         //
         // The relevance line is where most of the maths lives, and it used to be

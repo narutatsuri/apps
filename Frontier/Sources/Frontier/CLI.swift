@@ -13,6 +13,11 @@ enum CLI {
             grow(args.firstIndex(of: "--grow").flatMap { args.count > $0 + 1 ? Int(args[$0 + 1]) : nil } ?? 12)
         }
         if let i = args.firstIndex(of: "--write"), i + 1 < args.count { write(args[i + 1]) }
+        if let i = args.firstIndex(of: "--import"), i + 1 < args.count {
+            let name = args.firstIndex(of: "--name")
+                .flatMap { args.count > $0 + 1 ? args[$0 + 1] : nil }
+            importResource(args[i + 1], name: name, planOnly: args.contains("--plan"))
+        }
         if args.contains("--syllabus") { syllabus() }
         if args.contains("--latexify") { latexify() }
         if let i = args.firstIndex(of: "--walk"), i + 1 < args.count { walk(args[i + 1]) }
@@ -87,6 +92,51 @@ enum CLI {
             print("  \(mark) \(s.title) — \(s.url)")
         }
         exit(0)
+    }
+
+    /// `--import <pdf-or-url> [--name "…"]` — one resource, covered end to end.
+    ///
+    /// Unlike --syllabus, which unions courses into a curriculum, this takes a
+    /// single resource the reader has chosen — the RLHF book, a course PDF, a
+    /// long post — and turns *all of it* into chained concepts, so the daily
+    /// session walks through it front to back.
+    static func importResource(_ spec: String, name: String?, planOnly: Bool = false) -> Never {
+        if !planOnly { guard Tutor.isAvailable else { print("claude CLI not found"); exit(1) } }
+        print("loading \(spec)…")
+        guard let loaded = Resource.load(spec, nameOverride: name) else {
+            print("could not read \(spec) — give a PDF path or an http(s) URL"); exit(1)
+        }
+        let batches = Resource.batches(loaded.sections)
+        let chars = loaded.sections.reduce(0) { $0 + $1.text.count }
+        print("\"\(loaded.name)\" — \(loaded.sections.count) sections, \(chars / 1000)k chars, "
+              + "\(batches.count) model call\(batches.count == 1 ? "" : "s")")
+        for s in loaded.sections.prefix(40) { print("   · \(s.title)  (\(s.text.count / 1000)k)") }
+        // --plan: what would be read and how many calls it costs, without
+        // spending any of them. The way to check an extraction before a
+        // twenty-minute import trusts it.
+        if planOnly { exit(0) }
+
+        var proposed: [Concept] = []
+        var addedTotal = 0
+        for (i, batch) in batches.enumerated() {
+            print("\n[\(i + 1)/\(batches.count)] \(batch.map(\.title).joined(separator: " · ").prefix(90))")
+            let concepts = Tutor.digest(
+                resource: loaded.name,
+                sections: batch.map { ($0.title, $0.text) },
+                existing: Store.shared.concepts, proposed: proposed)
+            guard !concepts.isEmpty else {
+                print("   nothing came back — \(Tutor.lastError ?? "no detail")")
+                continue
+            }
+            proposed += concepts
+            let added = Store.shared.add(concepts)
+            addedTotal += added
+            for c in concepts { print("   + \(c.id)  [\(c.area.label)]") }
+            if added < concepts.count { print("   (\(concepts.count - added) already existed)") }
+        }
+        print("\nimported \(addedTotal) concepts from \"\(loaded.name)\"")
+        report()
+        exit(addedTotal > 0 ? 0 : 1)
     }
 
     static func walk(_ id: String) -> Never {

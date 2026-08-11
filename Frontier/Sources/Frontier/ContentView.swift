@@ -1,4 +1,6 @@
+import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @ObservedObject var model: Model
@@ -8,6 +10,7 @@ struct ContentView: View {
     /// Which rendering of the concept you are reading. Remembered, because it
     /// is how you like to read rather than a per-concept choice.
     @AppStorage("frontier.walkthrough") private var walkedThrough = true
+    @State private var showingImport = false
 
     var body: some View {
         NavigationSplitView {
@@ -32,6 +35,22 @@ struct ContentView: View {
                 .help("Read today's concept, or see the whole graph")
             }
             ToolbarItem {
+                // A whole resource — a book, a course PDF, a long post — turned
+                // into chained concepts and walked through end to end.
+                Button { showingImport = true } label: {
+                    if model.busy == "import" {
+                        HStack(spacing: 5) {
+                            ProgressView().controlSize(.small)
+                            Text(model.importProgress ?? "Importing…").lineLimit(1)
+                        }
+                    } else {
+                        Label("Import course", systemImage: "square.and.arrow.down")
+                    }
+                }
+                .help("Turn a whole book, course PDF, or long post into concepts and learn it end to end")
+                .disabled(model.busy != nil)
+            }
+            ToolbarItem {
                 // Named, not just an icon. It spends a minute or two asking for
                 // new concepts, which is not something to discover by pressing
                 // an unlabelled button and waiting.
@@ -50,6 +69,7 @@ struct ContentView: View {
             }
         }
         .onAppear { model.load() }
+        .sheet(isPresented: $showingImport) { ImportSheet(model: model) }
         .alert("Frontier", isPresented: .constant(model.note != nil)) {
             Button("OK") { model.note = nil }
         } message: { Text(model.note ?? "") }
@@ -270,5 +290,52 @@ struct ContentView: View {
                 .font(.system(size: 11)).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// A resource to learn end to end: a URL or a PDF.
+private struct ImportSheet: View {
+    @ObservedObject var model: Model
+    @Environment(\.dismiss) private var dismiss
+    @State private var entry = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Import a course").font(.system(size: 14, weight: .semibold))
+            TextField("URL or PDF path — e.g. https://rlhfbook.com/", text: $entry)
+                .textFieldStyle(.roundedBorder)
+            HStack(spacing: 8) {
+                Button("Choose PDF…") { pick() }
+                if !entry.isEmpty, !entry.hasPrefix("http") {
+                    Text((entry as NSString).lastPathComponent)
+                        .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
+                }
+            }
+            Text("The whole resource becomes concepts, chained in its own reading "
+                 + "order, so the daily session walks you through it front to back. "
+                 + "A book is one model call per chapter — twenty minutes or so for "
+                 + "a whole book, and progress lands as it goes.")
+                .font(.system(size: 9)).foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button("Import") {
+                    model.importResource(entry)
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(entry.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(18)
+        .frame(width: 460)
+    }
+
+    private func pick() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.pdf]
+        panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK, let url = panel.url { entry = url.path }
     }
 }

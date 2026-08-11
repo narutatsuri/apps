@@ -88,6 +88,51 @@ final class Model: ObservableObject {
         }
     }
 
+    /// One resource, covered end to end. What "Import" in the toolbar runs.
+    @Published var importProgress: String?
+
+    func importResource(_ spec: String) {
+        guard busy == nil else { return }
+        guard Tutor.isAvailable else { note = "The claude CLI was not found."; return }
+        busy = "import"
+        importProgress = "Reading it…"
+        let existing = concepts
+        Task.detached {
+            guard let loaded = Resource.load(spec.trimmingCharacters(in: .whitespaces)) else {
+                await MainActor.run {
+                    self.busy = nil; self.importProgress = nil
+                    self.note = "Could not read that — give a PDF path or an http(s) URL."
+                }
+                return
+            }
+            let batches = Resource.batches(loaded.sections)
+            var proposed: [Concept] = []
+            var addedTotal = 0
+            for (i, batch) in batches.enumerated() {
+                await MainActor.run {
+                    self.importProgress = "\(loaded.name) — section \(i + 1) of \(batches.count)…"
+                }
+                let concepts = Tutor.digest(
+                    resource: loaded.name,
+                    sections: batch.map { ($0.title, $0.text) },
+                    existing: existing, proposed: proposed)
+                proposed += concepts
+                // Saved as they arrive, so a failure halfway keeps the chapters
+                // already digested rather than discarding twenty minutes.
+                addedTotal += await MainActor.run { Store.shared.add(concepts) }
+                await MainActor.run { self.load() }
+            }
+            let total = addedTotal, name = loaded.name
+            await MainActor.run {
+                self.busy = nil; self.importProgress = nil
+                self.note = total == 0
+                    ? "Nothing came back — \(Tutor.lastError ?? "no detail")."
+                    : "Imported \(total) concepts from \(name). The daily session now walks through it in order."
+                self.load()
+            }
+        }
+    }
+
     /// Extends the graph, filling its own holes first.
     func grow(_ count: Int = 12) {
         guard busy == nil else { return }

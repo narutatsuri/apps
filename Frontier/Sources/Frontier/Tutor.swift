@@ -345,6 +345,70 @@ enum Tutor {
         return parse(reply)
     }
 
+    /// Turns one batch of a resource's sections into concepts that cover it.
+    ///
+    /// Different from `synthesise`, which unions six syllabi into one taste-free
+    /// curriculum, and from `next`, which continues those courses. This walks a
+    /// single resource the reader has chosen — a book, a course PDF, a long post
+    /// — and covers *all of it, in its own order*: the point of importing the
+    /// RLHF book is to come out the other side having read the RLHF book, not a
+    /// judged selection of it. Depth of coverage is the model's call per
+    /// section; what is not negotiable is that nothing is skipped.
+    static func digest(resource: String, sections: [(title: String, text: String)],
+                       existing: [Concept], proposed: [Concept]) -> [Concept] {
+        let known = (existing.map { "\($0.id) — \($0.title)" }
+                     + proposed.map { "\($0.id) — \($0.title) (from this resource, earlier sections)" })
+            .joined(separator: "\n")
+        let material = sections.map { "### SECTION: \($0.title)\n\($0.text)" }
+            .joined(separator: "\n\n")
+
+        let prompt = """
+            \(reader)
+
+            They are working through "\(resource)" end to end, in order. Below \
+            \(sections.count == 1 ? "is one section" : "are consecutive sections") \
+            of it, as extracted text — read past any extraction noise.
+
+            Already in their graph (do not repeat these ids):
+            \(known.isEmpty ? "(nothing yet)" : known)
+
+            Turn this material into concepts, covering ALL of it — every method, \
+            derivation and mechanism these sections actually teach. One concept \
+            is one sitting of fifteen to forty minutes. A dense section becomes \
+            several concepts; a thin one becomes one; a section that only \
+            restates what the graph already has becomes none, with its content \
+            noted in REQUIRES of what follows. Do not summarise the resource \
+            into highlights — the reader chose to learn the whole thing.
+
+            REQUIRES must chain the resource's own reading order: a concept \
+            rests on the concepts from earlier in the resource it builds on, \
+            plus any graph ids it genuinely needs. That chain is what lets the \
+            app walk them through the resource front to back.
+
+            RELEVANCE names where in the resource this is taught (section or \
+            chapter), then why it matters for this reader.
+
+            Output one block per concept, exactly this format, nothing else:
+
+            ID: kebab-case-id
+            TITLE: Human readable title
+            AREA: one of hardware, systems, training, architecture, theory, safety, evaluation, tooling
+            REQUIRES: comma-separated ids, or none
+            RELEVANCE: "\(resource)", the section, then one concrete sentence. LaTeX for any maths, as $…$.
+            ---
+
+            \(material)
+            """
+        guard let reply = ask(prompt, timeout: 900) else { return [] }
+        var out = parse(reply)
+        // Provenance is recorded by the app, not trusted to the model: every
+        // imported concept says what it was imported from.
+        for i in out.indices where !out[i].courses.contains(resource) {
+            out[i].courses.append(resource)
+        }
+        return out
+    }
+
     // MARK: - Writing one concept
 
     /// The same concept, taught from nothing.
