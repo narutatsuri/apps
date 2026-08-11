@@ -163,9 +163,10 @@ session/ready), and the graph renders level-of-detail: bottlenecks and
 anything actionable in full, the tail as specks, budget rising with zoom²
 ("simplified — zoom in for the rest" in the legend). `--render <id|all>`
 pushes any concept through the real bundled renderer headlessly — all 275
-render — and the reading pane reloads itself if WebKit's content process dies
-instead of sitting blank. PaperNotes' copy of the graph got the smaller
-matching fix (dictionary lookups, not per-node linear scans).
+render — and the reading pane reloads itself if WebKit's content process dies.
+PaperNotes' copy of the graph got the smaller matching fix (dictionary
+lookups, not per-node linear scans). **The reading pane itself still does not
+paint — see ACTIVE INVESTIGATION at the bottom of this file; start there.**
 
 Open:
 - **Most concepts unwritten.** The corpus is mostly empty until entries are
@@ -226,6 +227,86 @@ Open:
 - The user asked for a conference-deadline app (`Deadlines`) and then asked for
   it to be deleted. It is gone from disk and from this repo; the git history
   still contains it if it is ever wanted back.
+
+---
+
+## ACTIVE INVESTIGATION — Frontier's reading pane never paints (pick this up first)
+
+The user's symptom: selecting a concept shows a blank pane. Reproduced,
+instrumented, and half-solved on 2026-08-11; the session was cut mid-bisection.
+The working tree (mirrored here) is mid-surgery and carries all the tooling.
+Everything below was measured, not guessed; the screenshots and pixel counts
+came from the CGWindowList + `screencapture -l<id>` technique above, scored
+with a PIL "count pixels lighter than 120 in the pane region" one-liner.
+
+### What is established
+
+1. **The renderer is fine.** The DOM holds the full document (26,931 chars for
+   `gpu-execution-model`; `FRONTIER_WEBLOG=1` logs it), `--render all` renders
+   all 275 concepts headlessly, and the layout dump (`FRONTIER_DUMP=1`) puts
+   the WKWebView at exactly the pane's frame, visible, alpha 1. The pane still
+   paints nothing — pixel-checked flat, not dark-on-dark.
+2. **The process is fine.** Bare `NSWindow` probes in the same running app all
+   paint: plain, with the `drawsBackground=false` KVC, with a unified toolbar
+   plus `.fullSizeContentView`, and with `NSHostingView(ConceptPreview)`
+   (`FRONTIER_WEBPROBE=1` opens all of them).
+3. **The SwiftUI `Window` scene's window composites no web content at all** —
+   SwiftUI-hosted, AppKit-injected (`FRONTIER_INJECT=1`), or overlaid
+   (`FRONTIER_OVERLAY=1`). All blank. The app now builds its window in AppKit
+   instead (`AppDelegate.makeWindow`), toolbar replaced by an in-content bar.
+4. **Root cause, window half — CONFIRMED by single-variable bisection:** a
+   window whose frame changes between creation and its first compositor commit
+   never composites out-of-process layers again on this macOS (Darwin 25.5.0).
+   `win.center()` → blank; `win.setFrameAutosaveName(…)` (it restores, i.e.
+   moves) → blank; the identical construction without them → paints; the same
+   move applied 1 s later → still paints. `makeKeyAndOrderFront`,
+   `isReleasedWhenClosed`, every styleMask flag including `.miniaturizable` —
+   all innocent. This is why the SwiftUI scene window fails: scenes restore
+   their saved frame at launch. `makeWindow` now computes the starting rect by
+   hand (parsing `NSWindow Frame FrontierMain` from defaults) so the window is
+   *born* at its final frame, and arms `setFrameAutosaveName` at +1 s.
+5. **There is a second poisoner inside ContentView, not yet identified.** With
+   the clean-born window: bare `ConceptPreview` as the window's content paints;
+   the full `ContentView` is blank. Already eliminated *in the clean window*:
+   `NavigationSplitView` (swapped for a hand-rolled HStack — still blank) and
+   the materials (`.listStyle(.sidebar)`, `.background(.bar)` — still blank).
+   Not yet eliminated: the segmented pickers (prime suspect — they carry the
+   LiftPortal/`CAPortalLayer` glass machinery seen in the layer dump), the
+   `List` itself, the control-bar buttons, and the shared modifiers
+   (`.sheet`/`.alert`/`.overlay`/`.onAppear`).
+
+### The next step, ready to run
+
+`ContentView` has a bisection switch already wired: `FRONTIER_BARE=1` renders
+the pane alone under the shared modifiers, `=2` adds the control bar (segmented
+picker), `=3` adds the sidebar `List`. Build, install, then for each level:
+launch with the env var, find the window id, screenshot, count light pixels.
+L1 blank → the shared modifiers; L2 blank → the control bar; L3 blank → the
+List. Then delete the guilty part's effect (e.g. replace the segmented picker
+with plain buttons) and re-verify. Afterwards **strip the scaffolding**: the
+`FRONTIER_BARE` switch, `WebProbe.swift`, `LayoutDump.swift`, and the probe
+paragraphs in `AppDelegate` can all go once the pane paints; `ZoomDiagnose`
+(zoom regression) and `ClickDiagnose`/`FRONTIER_WEBLOG` are worth keeping.
+
+### Also in flight / worth knowing
+
+- `ConceptPreview` is currently double-hosted (`NSHostingView<WebPane>` inside
+  the representable) with a `FillContainer` that sizes the web view in
+  `layout()`, plus WebKit process-death recovery. The double-hosting was
+  adopted mid-hunt and is probably unnecessary once the real poisoner is out —
+  simplify back to one representable and re-verify.
+- The current installed build still shows the blank pane (unchanged from the
+  user's complaint); sidebar, Courses, graph, import and zoom all work.
+- **PaperNotes probably has the same disease** — same WKWebView-in-scene-window
+  pattern, unverified because its preview needs a selected paper. Check by
+  opening a note; if blank, the same clean-birth AppKit window treatment (or
+  whatever the content-level fix turns out to be) applies there.
+- If the hunt stalls, the robust fallback is the gotchas list's own advice:
+  render in the offscreen web view (which provably works) → `createPDF` →
+  display in a `PDFView` — in-process drawing, no remote layers. Remember the
+  KaTeX lazy-font gotcha if going this route.
+- A fix, once found, deserves a red-then-green check: the pixel-count loop
+  makes that cheap.
 
 ---
 

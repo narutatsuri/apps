@@ -12,67 +12,129 @@ struct ContentView: View {
     @AppStorage("frontier.walkthrough") private var walkedThrough = true
     @State private var showingImport = false
 
+    /// FRONTIER_BARE=1/2/3 — content bisection levels for the compositing hunt.
+    private var bareLevel: Int {
+        Int(ProcessInfo.processInfo.environment["FRONTIER_BARE"] ?? "0") ?? 0
+    }
+
     var body: some View {
-        NavigationSplitView {
-            sidebar
-                .navigationSplitViewColumnWidth(min: 240, ideal: 280)
-        } detail: {
-            if showGraph {
-                ConceptGraphView(model: model)
-            } else if let concept = model.current {
-                reading(concept)
-            } else {
-                empty
+        Group {
+            switch bareLevel {
+            case 1:
+                ConceptPreview(markdown: "# L1\n\nPane alone under the shared modifiers. $x^2$")
+            case 2:
+                VStack(spacing: 0) {
+                    controlBar
+                    Divider()
+                    ConceptPreview(markdown: "# L2\n\nPane plus control bar. $x^2$")
+                }
+            case 3:
+                HStack(spacing: 0) {
+                    sidebar.frame(width: 280)
+                    Divider()
+                    ConceptPreview(markdown: "# L3\n\nPane plus sidebar. $x^2$")
+                }
+            default:
+                realBody
             }
         }
-        .toolbar {
-            ToolbarItem {
-                Picker("", selection: $showGraph) {
-                    Image(systemName: "text.alignleft").tag(false)
-                    Image(systemName: "point.3.connected.trianglepath.dotted").tag(true)
-                }
-                .pickerStyle(.segmented)
-                .help("Read today's concept, or see the whole graph")
-            }
-            ToolbarItem {
-                // A whole resource — a book, a course PDF, a long post — turned
-                // into chained concepts and walked through end to end.
-                Button { showingImport = true } label: {
-                    if model.busy == "import" {
-                        HStack(spacing: 5) {
-                            ProgressView().controlSize(.small)
-                            Text(model.importProgress ?? "Importing…").lineLimit(1)
-                        }
-                    } else {
-                        Label("Import course", systemImage: "square.and.arrow.down")
-                    }
-                }
-                .help("Turn a whole book, course PDF, or long post into concepts and learn it end to end")
-                .disabled(model.busy != nil)
-            }
-            ToolbarItem {
-                // Named, not just an icon. It spends a minute or two asking for
-                // new concepts, which is not something to discover by pressing
-                // an unlabelled button and waiting.
-                Button { model.grow() } label: {
-                    if model.busy == "grow" {
-                        HStack(spacing: 5) {
-                            ProgressView().controlSize(.small)
-                            Text("Extending…")
-                        }
-                    } else {
-                        Label("Extend graph", systemImage: "plus.diamond")
-                    }
-                }
-                .help("Ask for more concepts — fills gaps in the graph first. Takes a minute or two.")
-                .disabled(model.busy != nil)
+        .onAppear { model.load(); ClickDiagnose.scheduleIfAsked(model: model) }
+        // FRONTIER_OVERLAY=1 — the same renderer, same window, *outside* the
+        // split view's detail column. Paints here + blank in the pane = the
+        // column; blank here too = the whole window cannot composite it.
+        .overlay(alignment: .topTrailing) {
+            if ProcessInfo.processInfo.environment["FRONTIER_OVERLAY"] == "1" {
+                ConceptPreview(markdown: "# Overlay probe\n\nSame window, outside the detail column. $x^2$")
+                    .frame(width: 320, height: 180)
+                    .border(.red)
             }
         }
-        .onAppear { model.load() }
         .sheet(isPresented: $showingImport) { ImportSheet(model: model) }
         .alert("Frontier", isPresented: .constant(model.note != nil)) {
             Button("OK") { model.note = nil }
         } message: { Text(model.note ?? "") }
+    }
+
+    private var realBody: some View {
+        // The controls live in a bar inside the content rather than in a scene
+        // toolbar: this window is a plain NSWindow (the SwiftUI Window scene's
+        // own window cannot composite a WKWebView on this macOS — see App.swift),
+        // and a plain window has no SwiftUI toolbar to put them in.
+        VStack(spacing: 0) {
+            controlBar
+            Divider()
+            // A hand-rolled split. NavigationSplitView re-blanked the pane even
+            // in a cleanly-created window — it restores column state during
+            // setup, which resizes the window before its first commit, the
+            // exact move that kills out-of-process compositing (see App.swift).
+            HStack(spacing: 0) {
+                sidebar
+                    .frame(width: 280)
+                Divider()
+                Group {
+                    if showGraph {
+                        ConceptGraphView(model: model)
+                    } else if let concept = model.current {
+                        reading(concept)
+                    } else {
+                        empty
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+    }
+
+    // MARK: - Control bar
+
+    private var controlBar: some View {
+        HStack(spacing: 10) {
+            Picker("", selection: $showGraph) {
+                Label("Read", systemImage: "text.alignleft").tag(false)
+                Label("Graph", systemImage: "point.3.connected.trianglepath.dotted").tag(true)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 160)
+            .help("Read today's concept, or see the whole graph")
+
+            Spacer()
+
+            // A whole resource — a book, a course PDF, a long post — turned
+            // into chained concepts and walked through end to end.
+            Button { showingImport = true } label: {
+                if model.busy == "import" {
+                    HStack(spacing: 5) {
+                        ProgressView().controlSize(.small)
+                        Text(model.importProgress ?? "Importing…").lineLimit(1)
+                    }
+                } else {
+                    Label("Import course", systemImage: "square.and.arrow.down")
+                }
+            }
+            .help("Turn a whole book, course PDF, or long post into concepts and learn it end to end")
+            .disabled(model.busy != nil)
+
+            // Named, not just an icon. It spends a minute or two asking for
+            // new concepts, which is not something to discover by pressing
+            // an unlabelled button and waiting.
+            Button { model.grow() } label: {
+                if model.busy == "grow" {
+                    HStack(spacing: 5) {
+                        ProgressView().controlSize(.small)
+                        Text("Extending…")
+                    }
+                } else {
+                    Label("Extend graph", systemImage: "plus.diamond")
+                }
+            }
+            .help("Ask for more concepts — fills gaps in the graph first. Takes a minute or two.")
+            .disabled(model.busy != nil)
+        }
+        .controlSize(.small)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 
     // MARK: - Sidebar
@@ -112,7 +174,7 @@ struct ContentView: View {
                 ForEach(model.concepts.filter(\.isKnown).prefix(20)) { row($0) }
             }
         }
-        .listStyle(.sidebar)
+        .listStyle(.inset)
     }
 
     private struct CourseGroup {
@@ -195,6 +257,16 @@ struct ContentView: View {
                     ConceptPreview(markdown: document(concept))
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
+                // The one flexible child, forced to *accept* the pane's height.
+                // Without this the web view reports its full document height —
+                // logged at 3,471pt for a 10k-char walkthrough in a 731pt pane —
+                // the stack inflates past the window, and the pane shows the
+                // empty stretch of an off-screen document: a written concept
+                // that reads as a completely blank screen. Same bug, same fix,
+                // as PaperNotes' EditorPane; short entries never triggered it,
+                // which is why the pane worked until the entries grew.
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .layoutPriority(1)
             } else {
                 // Unwritten: the heading and the reason it is on the list, then
                 // the offer to write it — where you are looking, not stranded at
