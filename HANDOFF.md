@@ -81,8 +81,9 @@ Same prompt then answered in 70s. See `Frontier/Sources/Frontier/Tutor.swift`.
 
 **Draining only stdout deadlocks the child.** A pipe nobody reads holds 64 KB and
 then blocks the writer forever. Drain stdout *and* stderr, each on its own queue.
-`PaperNotes/Sources/PaperNotes/Judge.swift` still has this latent bug — worth
-fixing before it bites.
+Fixed in `PaperNotes/Sources/PaperNotes/Judge.swift` on 2026-08-11; a self-test
+floods stderr with 200 KB and goes red if the drain is removed (checked by
+removing it).
 
 **`~/Documents` and `~/Desktop` are TCC-blocked** for the shell and for the Read
 tool. Route through Finder: `osascript -e 'tell application "Finder" to duplicate
@@ -140,8 +141,21 @@ CS336, CMU 15-442), `--grow` continues those syllabi rather than inventing,
 `--write <id>` generates the reference entry, `--walk <id>` generates the
 walkthrough, `--verify` checks source links.
 
+Added 2026-08-11: `--import <pdf-or-url> [--name …] [--plan]` (and an Import
+course toolbar button) turns one whole resource — a web book, a course PDF, a
+long post — into concepts chained in its own reading order, so the session
+walks it end to end. A site root is asked for `/llms-full.txt` first
+(rlhfbook.com serves its book that way); a page splits at its own headings; a
+PDF by outline or page windows. Imported that day: the RLHF Book (198 concepts
+from 20 chapters) and a policy-optimization survey (PPO→GRPO→…→SAPO, 15
+concepts) — correctly chained, and cross-linked where the book builds on the
+survey's GRPO. The graph is at 275 concepts, almost all unwritten.
+Known limitation: a multi-page web book with no llms-full.txt imports only the
+page given — use its PDF. Also fixed: title-bar double-click now zooms
+(NSToolbarTitleView was swallowing it; measured with FRONTIER_ZOOMTEST=1).
+
 Open:
-- **62 concepts, 1 written.** The corpus is mostly empty until entries are
+- **Most concepts unwritten.** The corpus is mostly empty until entries are
   generated; each takes ~70s.
 - **"Still learning" scores +12**, which pins a concept to the top of every
   session forever. The user wants spaced revisit (`dueOn` + scheduler) with a cap
@@ -155,25 +169,25 @@ Open:
 
 ### Paper Notes
 
-128 papers. 66 carry notes imported from the user's old files (a
-`paper_summaries.txt` and a `paper_summaries.html` recovered from their website's
-git history — both since deleted at their request). Imported notes are marked
-with an `Imported verbatim` comment and use the user's own template (`##
-Thoughts`, `## Method`), not the app's.
+137 papers. 75 carry notes imported from the user's old `paper_summaries.html`
+(recoverable from the website repo's git history at `2444ef0`, in
+`~/Website/narutatsuri.github.io`). Imported notes are marked with an `Imported
+verbatim` comment and use the user's own template (`## Thoughts`, `## Method`),
+not the app's.
 
-Open:
-- **The library repo is public and auto-pushes** (`pushEnabled = 1`, on a timer).
-  The user was told twice it was unpushed before this was noticed; they have been
-  told, and the decision is theirs.
-- `--rank`, `Vocabulary` and `Search` do not know about `archaic`, so 33 archived
-  papers still compete for ranking band shares. The graph and recommender do
-  filter them.
-- 9 papers with real notes could not be imported: ACL Anthology work with no
-  arXiv id, and the library is keyed by arXiv id. The longest is 6,470 characters
-  (Rivest & Sloan). Supporting non-arXiv keys would recover them.
-- 3 papers are queued *and* marked read.
-- 21 imported notes open with `**Keywords:** …` which would map naturally onto
-  the app's `tags:` field. Offered, not done.
+Resolved on 2026-08-11:
+- **Public repo**: the user decided public is fine; it pushes.
+- `Ranker.rankable` and the in-app recommendation paths exclude `archaic`;
+  search keeps archived papers findable but ranks them after current work,
+  labelled "(archived)".
+- Non-arXiv keys exist (written as `id:` in frontmatter; ACL ids get Semantic
+  Scholar metadata and Anthology links). The 9 locked-out notes were imported
+  this way — 8 ACL papers plus Rivest & Sloan 1994 under the hand key
+  `rivest-sloan-1994`. Four stub notes (61–90 chars) were left unimported.
+- The 3 queued-and-read papers were unread (add-time `read:` stamps); the
+  stamps were removed, and entering the queue now clears the date on a virgin
+  note.
+- The 21 `**Keywords:**` lines were moved into `tags:`.
 
 ### Jot
 
@@ -192,9 +206,10 @@ Open:
 
 ## Things deliberately not done
 
-- **Not committed**: `~/Developer/Jot` and `~/Developer/PaperNotes` have dirty
-  working trees. Their content is in this mirror; their own history is stale.
-- **Frontier is not in the mirror yet.**
+- **Not committed**: `~/Developer/Jot` has a dirty working tree. Its content is
+  in this mirror; its own history is stale. (`~/Developer/PaperNotes` got a
+  catch-up commit on 2026-08-11; `~/Developer/Frontier` has no repo of its own —
+  the mirror is its only history.)
 - The user asked for a conference-deadline app (`Deadlines`) and then asked for
   it to be deleted. It is gone from disk and from this repo; the git history
   still contains it if it is ever wanted back.
