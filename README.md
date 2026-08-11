@@ -1,12 +1,13 @@
 # apps
 
-Five small macOS apps, kept here so they survive this machine and can be rebuilt
+Six small macOS apps, kept here so they survive this machine and can be rebuilt
 anywhere. Each lives in its own folder, is a self-contained Swift Package with
 its own `build.sh` and its own README, and installs to `/Applications`.
 
 | Folder | Installs as | What it does | Its data lives in |
 |---|---|---|---|
 | `CodingAgentUsage/` | Coding Agent Usage.app | Live Claude and Codex usage against plan limits, in the menu bar | — |
+| `Frontier/` | Frontier.app | A curriculum graph for ML systems and GPU internals — what you are ready to learn next, synthesised from real course syllabi | `~/Library/Application Support/Frontier` |
 | `Jot/` | Jot.app | Markdown sticky notes. ⌃⌥Space for a new one; markers disappear as you type them and equations typeset | `~/Library/Application Support/Jot` |
 | `PaperNotes/` | Paper Notes.app | arXiv reading notes, with Claude grading the notes, appraising papers on the interest of the idea, and recommending new ones | `~/Library/Application Support/Paper Notes` |
 | `Pomodoro/` | Pomodoro.app | Pomodoro timer with a full-screen break overlay | — |
@@ -19,12 +20,15 @@ app's data, rather than as another folder in the home directory. Never inside th
 data with it. Backing up the code and backing up the writing stay separate
 decisions.
 
+Start with [HANDOFF.md](HANDOFF.md) if you are picking this up cold — it has the
+conventions, the gotchas that cost hours, and what is still open.
+
 ## Building on a fresh machine
 
 ```sh
 git clone https://github.com/narutatsuri/apps.git
 cd apps
-./install.sh              # all five
+./install.sh              # all six
 ./install.sh Jot          # or just one
 ```
 

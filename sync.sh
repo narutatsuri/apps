@@ -7,7 +7,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-for app in CodingAgentUsage Jot PaperNotes Pomodoro VoiceBridge; do
+for app in CodingAgentUsage Frontier Jot PaperNotes Pomodoro VoiceBridge; do
   src="$HOME/Developer/$app"
   [ -d "$src" ] || { echo "skipping $app — not in ~/Developer"; continue; }
   rsync -a --delete \
