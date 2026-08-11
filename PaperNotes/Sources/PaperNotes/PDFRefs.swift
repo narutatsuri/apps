@@ -33,9 +33,15 @@ enum PDFRefs {
     }
 
     /// "2510.23966v2" and "arXiv:2510.23966" both mean the same node in the graph.
+    ///
+    /// Only an arXiv-shaped id gets this treatment. Any other key — an ACL
+    /// Anthology id like "2021.emnlp-main.70" — passes through untouched, because
+    /// the digit-truncation below would quietly turn it into "2021.", a different
+    /// identity that matches nothing.
     static func normalise(_ id: String) -> String {
         let trimmed = id.trimmingCharacters(in: .whitespaces)
             .replacingOccurrences(of: "arXiv:", with: "", options: .caseInsensitive)
+        guard Paper.isArxivID(trimmed) else { return trimmed }
         guard let dot = trimmed.firstIndex(of: ".") else { return trimmed }
         let tail = trimmed[trimmed.index(after: dot)...]
         let digits = tail.prefix { $0.isNumber }

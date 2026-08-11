@@ -20,7 +20,12 @@ enum Verdict: String, CaseIterable, Codable {
 /// prompts survive as headings. That keeps LaTeX and markdown working anywhere in
 /// the note, and matches how you'd write in any other editor.
 struct Paper: Identifiable, Equatable {
-    var arxivID: String              // "2510.23966" — also the identity for graph edges
+    /// The paper's key: an arXiv id for most of the library, but not necessarily —
+    /// ACL Anthology work has no arXiv id at all, and keying strictly by arXiv
+    /// locked nine written notes out of the library entirely. The name stays
+    /// `arxivID` because it is the identity everywhere (graph edges, filenames,
+    /// queue); `isArxiv` says which registry, if any, the key belongs to.
+    var arxivID: String              // "2510.23966", "2021.emnlp-main.70", "rivest-sloan-1994"
     var title: String = ""
     var authors: [String] = []
     var year: Int?
@@ -75,6 +80,49 @@ struct Paper: Identifiable, Equatable {
     var id: String { arxivID }
 
     var isQueued: Bool { queuePosition > 0 }
+
+    /// New-style arXiv: four digits, a dot, four or five digits, optionally "v2".
+    /// Parsed by hand — a Swift regex literal chokes on `{2}` in this toolchain.
+    static func isArxivID(_ id: String) -> Bool {
+        let parts = id.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 2, parts[0].count == 4, parts[0].allSatisfy(\.isNumber)
+        else { return false }
+        var tail = parts[1]
+        if let v = tail.firstIndex(of: "v") {
+            guard tail[tail.index(after: v)...].allSatisfy(\.isNumber),
+                  tail.index(after: v) < tail.endIndex else { return false }
+            tail = tail[..<v]
+        }
+        return (4...5).contains(tail.count) && tail.allSatisfy(\.isNumber)
+    }
+
+    /// ACL Anthology, either era: "2021.emnlp-main.70" or "P17-1042".
+    static func isACLID(_ id: String) -> Bool {
+        let new = id.split(separator: ".", omittingEmptySubsequences: false)
+        if new.count == 3, new[0].count == 4, new[0].allSatisfy(\.isNumber),
+           !new[1].isEmpty, new[1].allSatisfy({ $0.isLowercase || $0.isNumber || $0 == "-" }),
+           !new[2].isEmpty, new[2].allSatisfy(\.isNumber) {
+            // Distinguish from an arXiv id, which the 3-part split already has.
+            return true
+        }
+        let old = id.split(separator: "-", omittingEmptySubsequences: false)
+        return old.count == 2 && old[0].count == 3
+            && (old[0].first?.isUppercase ?? false)
+            && old[0].dropFirst().allSatisfy(\.isNumber)
+            && (3...4).contains(old[1].count) && old[1].allSatisfy(\.isNumber)
+    }
+
+    var isArxiv: Bool { Self.isArxivID(arxivID) }
+
+    /// Where the paper lives on the open web, keyed off the id's shape. Nil for a
+    /// hand-made key — a 1994 journal paper has no page worth guessing at.
+    var externalURL: URL? {
+        if isArxiv { return URL(string: "https://arxiv.org/abs/\(arxivID)") }
+        if Self.isACLID(arxivID) { return URL(string: "https://aclanthology.org/\(arxivID)/") }
+        return nil
+    }
+
+    var externalLinkLabel: String { isArxiv ? "arXiv" : "ACL Anthology" }
 
     /// What the badge shows. Yours wins whenever you have one; otherwise Claude's
     /// stands in, which is the whole point — the shelf is labelled without you
@@ -245,7 +293,9 @@ extension Paper {
 
     var markdown: String {
         var out = "---\n"
-        out += "arxiv: \(arxivID)\n"
+        // Calling a hand-made key "arxiv:" in a file meant to outlive the app
+        // would be a small lie that compounds; non-arXiv keys are written as "id:".
+        out += (isArxiv ? "arxiv" : "id") + ": \(arxivID)\n"
         out += "title: \(Self.escape(title))\n"
         if !authors.isEmpty { out += "authors: \(authors.joined(separator: "; "))\n" }
         if let year { out += "year: \(year)\n" }
@@ -286,7 +336,7 @@ extension Paper {
             let value = String(line[line.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
             if !key.isEmpty { front[key] = value }
         }
-        guard let id = front["arxiv"], !id.isEmpty else { return nil }
+        guard let id = front["arxiv"] ?? front["id"], !id.isEmpty else { return nil }
 
         self.arxivID = id
         self.title = front["title"] ?? ""

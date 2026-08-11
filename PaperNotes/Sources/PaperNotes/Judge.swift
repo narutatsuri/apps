@@ -20,9 +20,16 @@ enum Judge {
     /// callers are already off the main thread, and streaming buys nothing here.
     static func ask(_ prompt: String, timeout: TimeInterval = 240) -> String? {
         guard let cli = cliPath else { return nil }
+        return run(executable: cli, arguments: ["-p"], stdin: prompt, timeout: timeout)
+    }
+
+    /// The subprocess plumbing, separated from "which CLI" so the self-test can
+    /// push a deliberately chatty child through the exact code path the judge uses.
+    static func run(executable: String, arguments: [String], stdin input: String,
+                    timeout: TimeInterval) -> String? {
         let p = Process()
-        p.executableURL = URL(fileURLWithPath: cli)
-        p.arguments = ["-p"]
+        p.executableURL = URL(fileURLWithPath: executable)
+        p.arguments = arguments
 
         let stdin = Pipe(), stdout = Pipe(), stderr = Pipe()
         p.standardInput = stdin
@@ -30,17 +37,23 @@ enum Judge {
         p.standardError = stderr
 
         do { try p.run() } catch { return nil }
-        stdin.fileHandleForWriting.write(Data(prompt.utf8))
+        stdin.fileHandleForWriting.write(Data(input.utf8))
         stdin.fileHandleForWriting.closeFile()
 
-        // Read on a background queue: a full pipe buffer would deadlock a judge that
-        // writes more than 64 KB before we start reading.
+        // Read on background queues: a full pipe buffer would deadlock a judge that
+        // writes more than 64 KB before we start reading. Both pipes — a child that
+        // fills the *stderr* buffer blocks just as finally as one that fills stdout,
+        // and nobody is coming back for either.
         var output = Data()
         let lock = NSLock()
         let reader = DispatchQueue(label: "judge.read")
         reader.async {
             let d = stdout.fileHandleForReading.readDataToEndOfFile()
             lock.lock(); output = d; lock.unlock()
+        }
+        let drainer = DispatchQueue(label: "judge.drain")
+        drainer.async {
+            _ = stderr.fileHandleForReading.readDataToEndOfFile()
         }
 
         let deadline = Date().addingTimeInterval(timeout)

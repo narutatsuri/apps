@@ -14,6 +14,12 @@ enum Importer {
         let papers = MainActor.assumeIsolated { Library.shared.papers }
         var updated = 0
         for var paper in papers {
+            // A hand-made key has no registry to ask; saying "lookup failed" for
+            // it every refresh would teach you to ignore real failures.
+            guard paper.isArxiv || Paper.isACLID(paper.arxivID) else {
+                print("  – \(paper.arxivID) — hand-keyed, nothing to look up")
+                continue
+            }
             let done = DispatchSemaphore(value: 0)
             var fetched: Metadata.Result?
             let id = paper.arxivID

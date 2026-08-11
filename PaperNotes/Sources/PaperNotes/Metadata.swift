@@ -24,6 +24,12 @@ enum Metadata {
 
     static func fetch(arxivID: String) async -> Result? {
         let id = PDFRefs.normalise(arxivID)
+        // Non-arXiv keys never go near arxiv.org — asking it about an ACL id
+        // costs two spaced requests to learn nothing. Semantic Scholar indexes
+        // the Anthology directly; a hand-made key has no registry at all.
+        guard Paper.isArxivID(id) else {
+            return Paper.isACLID(id) ? await fetchSemanticScholar("ACL:\(id)") : nil
+        }
         async let arxiv = fetchArxiv(id)
         async let counted = fetchCitationCount(id)
         guard var result = await arxiv else {
@@ -32,6 +38,28 @@ enum Metadata {
         }
         result.citations = await counted
         return result
+    }
+
+    // MARK: - Semantic Scholar (ACL Anthology ids)
+
+    private static func fetchSemanticScholar(_ paperID: String) async -> Result? {
+        guard let url = URL(string: "https://api.semanticscholar.org/graph/v1/paper/\(paperID)"
+            + "?fields=title,authors,year,venue,citationCount,publicationDate") else { return nil }
+        var req = URLRequest(url: url)
+        req.setValue("PaperNotes (local research tool)", forHTTPHeaderField: "User-Agent")
+        req.timeoutInterval = 20
+        guard let (data, response) = try? await URLSession.shared.data(for: req),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let title = json["title"] as? String, !title.isEmpty else { return nil }
+        let authors = (json["authors"] as? [[String: Any]] ?? [])
+            .compactMap { $0["name"] as? String }
+        return Result(title: title, authors: Array(authors.prefix(12)),
+                      year: json["year"] as? Int,
+                      venue: (json["venue"] as? String) ?? "",
+                      citations: json["citationCount"] as? Int ?? 0,
+                      published: (json["publicationDate"] as? String)
+                          .flatMap(SemanticScholar.day))
     }
 
     // MARK: - arXiv (authoritative for identity)

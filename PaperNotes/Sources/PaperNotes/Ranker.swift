@@ -40,8 +40,12 @@ enum Ranker {
 
     /// Papers must carry the one-clause idea from the per-paper pass — that summary
     /// is what makes a comparative ranking possible without shipping 68 PDFs.
+    ///
+    /// Archived papers sit the ranking out: the bands are shares of the library,
+    /// and 33 papers the reading has moved past competing for the same GOLD and
+    /// SOLID quotas pushes current work down a band it did not earn.
     static func rankable(_ papers: [Paper]) -> [Paper] {
-        papers.filter { !$0.appraisalNote.isEmpty }
+        papers.filter { !$0.appraisalNote.isEmpty && !$0.archaic }
     }
 
     static func targetCounts(for n: Int) -> [(Verdict, Int)] {

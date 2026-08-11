@@ -35,8 +35,14 @@ enum SemanticScholar {
         // Cap the seed list: the endpoint weighs every seed, and a whole library
         // of seeds returns the average of your interests rather than the sharp
         // end of them.
+        // Prefix by what each key actually is — sending "arXiv:2021.emnlp-main.70"
+        // for an ACL paper would poison the seed list with a lookup miss.
         let body: [String: Any] = [
-            "positivePaperIds": seeds.prefix(20).map { "arXiv:\($0)" },
+            "positivePaperIds": seeds.prefix(20).compactMap { id -> String? in
+                if Paper.isArxivID(id) { return "arXiv:\(id)" }
+                if Paper.isACLID(id) { return "ACL:\(id)" }
+                return nil
+            },
             "negativePaperIds": [],
         ]
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)

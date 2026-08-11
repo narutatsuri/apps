@@ -98,9 +98,12 @@ enum Search {
         }
 
         // Stable within a rank: keep the order the caller already sorted by, so
-        // search does not silently reshuffle the sort you chose.
+        // search does not silently reshuffle the sort you chose. Archived papers
+        // stay searchable — that is the deal archiving makes — but within a rank
+        // they yield to the papers the reading is currently about.
         return hits.enumerated()
-            .sorted { ($0.element.field, $0.offset) < ($1.element.field, $1.offset) }
+            .sorted { ($0.element.field.rawValue, $0.element.paper.archaic ? 1 : 0, $0.offset)
+                    < ($1.element.field.rawValue, $1.element.paper.archaic ? 1 : 0, $1.offset) }
             .map(\.element)
     }
 

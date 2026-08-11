@@ -343,7 +343,10 @@ final class AppModel {
         guard !isRecommending else { return }
         isRecommending = true
         recommendations = []
-        let library = papers
+        // Same rule as the CLI: archived papers are reading you have moved past,
+        // so they are not evidence of what to read next — this feeds the seeds,
+        // the vocabulary, and the citation counts alike.
+        let library = Recommender.eligible(papers)
         let days = Prefs.freshWindowDays
         Task.detached {
             func note(_ s: String) async { await MainActor.run { self.recommendProgress = s } }
@@ -425,7 +428,9 @@ final class AppModel {
         guard !isRecommending, !recommendations.isEmpty else { return }
         guard Judge.isAvailable else { status = "claude CLI not found."; return }
         isRecommending = true
-        let library = papers
+        // The judge sees the library as context; the archived papers would
+        // describe a reader the library no longer is.
+        let library = Recommender.eligible(papers)
         var candidates = recommendations
         let total = candidates.count
         Task.detached {

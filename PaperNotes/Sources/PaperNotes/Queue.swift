@@ -39,7 +39,22 @@ enum ReadingQueue {
             .filter { !incomingSet.contains($0) }
 
         let order = atFront ? incoming + existing : existing + incoming
-        return renumber(order, in: papers)
+        var changed = renumber(order, in: papers)
+        // "Read next" on a paper with nothing written in it is a declaration that
+        // it has *not* been read — but adding stamps a read date the moment a
+        // paper lands, so three papers ended up queued and marked read at once.
+        // Entering the queue clears the date; writing the note restores it. A
+        // paper with a real note keeps its date: re-queuing something annotated
+        // is a revisit, not a contradiction.
+        let alreadyQueued = Set(papers.filter(\.isQueued)
+            .map { PDFRefs.normalise($0.arxivID) })
+        for i in changed.indices {
+            let id = PDFRefs.normalise(changed[i].arxivID)
+            guard incomingSet.contains(id), !alreadyQueued.contains(id),
+                  !changed[i].isSubstantive else { continue }
+            changed[i].readOn = nil
+        }
+        return changed
     }
 
     /// Positions after `ids` leave the queue.

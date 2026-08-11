@@ -42,7 +42,8 @@ enum Commands {
         let hits = Search.matches(args.joined(separator: " "), in: library)
         print("\(hits.count) of \(library.count) papers match \"\(args.joined(separator: " "))\"")
         for h in hits.prefix(12) {
-            let where_ = h.field.label.isEmpty ? "" : "  (\(h.field.label))"
+            let notes = [h.field.label, h.paper.archaic ? "archived" : ""].filter { !$0.isEmpty }
+            let where_ = notes.isEmpty ? "" : "  (\(notes.joined(separator: ", ")))"
             print("  \(h.paper.arxivID)  \(h.paper.title.prefix(58))\(where_)")
             if !h.snippet.isEmpty { print("      \(h.snippet.prefix(110))") }
         }

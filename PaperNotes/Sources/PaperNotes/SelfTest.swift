@@ -94,6 +94,12 @@ enum SelfTest {
               "old cross-lingual work would otherwise drag every suggestion toward it")
         check("unless asked for",
               Recommender.eligible([live, shelved], includeArchaic: true).count == 2)
+        check("archived papers sit the ranking out", {
+            var current = Paper(arxivID: "2509.25123"); current.appraisalNote = "an idea"
+            var past = Paper(arxivID: "1710.04087")
+            past.appraisalNote = "an idea"; past.archaic = true
+            return Ranker.rankable([current, past]).map(\.arxivID) == ["2509.25123"]
+        }(), "33 archived papers were competing for the same GOLD and SOLID quotas")
 
         check("within a year, ordering is by month",
               SortOrder.apply(.published, to: [june, sept]).first?.arxivID == "2509.25123")
@@ -113,6 +119,39 @@ enum SelfTest {
               PDFRefs.idFromFilename("Adaptive_Attacks__2510.09462.pdf") == "2510.09462")
         check("id from bare filename",
               PDFRefs.idFromFilename("2412.04984v2.pdf") == "2412.04984")
+
+        // --- non-arXiv keys. ACL Anthology work has no arXiv id at all, and
+        //     keying strictly by arXiv locked nine written notes out of the library.
+        check("arXiv id shapes are recognised",
+              Paper.isArxivID("2510.23966") && Paper.isArxivID("2510.23966v2")
+                && !Paper.isArxivID("2021.emnlp-main.70") && !Paper.isArxivID("P17-1042")
+                && !Paper.isArxivID("rivest-sloan-1994") && !Paper.isArxivID("2510.23966v"))
+        check("ACL id shapes are recognised, both eras",
+              Paper.isACLID("2021.emnlp-main.70") && Paper.isACLID("P17-1042")
+                && Paper.isACLID("D16-1250") && Paper.isACLID("N15-1104")
+                && !Paper.isACLID("2510.23966") && !Paper.isACLID("rivest-sloan-1994"))
+        check("normalise leaves an ACL id alone",
+              PDFRefs.normalise("2021.emnlp-main.70") == "2021.emnlp-main.70",
+              "digit truncation would have quietly turned it into \"2021.\"")
+        check("a non-arXiv key round-trips under id:", {
+            var acl = Paper(arxivID: "P17-1042")
+            acl.title = "Learning bilingual word embeddings with (almost) no bilingual data"
+            acl.year = 2017
+            let text = acl.markdown
+            return text.contains("id: P17-1042") && !text.contains("arxiv:")
+                && Paper(markdown: text)?.arxivID == "P17-1042"
+        }(), "written as id:, because calling it arxiv: in the file would be a lie")
+        check("published falls back to the year for non-arXiv keys", {
+            var acl = Paper(arxivID: "2021.emnlp-main.70"); acl.year = 2021
+            return acl.published == (2021, 0)
+        }(), "the id's leading digits look like YYMM but are not one")
+        check("external links follow the id's shape",
+              Paper(arxivID: "2510.23966").externalURL?.absoluteString
+                    == "https://arxiv.org/abs/2510.23966"
+                && Paper(arxivID: "2021.emnlp-main.70").externalURL?.absoluteString
+                    == "https://aclanthology.org/2021.emnlp-main.70/"
+                && Paper(arxivID: "rivest-sloan-1994").externalURL == nil,
+              "a hand-made key gets no link — a dead link dressed as real is worse than none")
 
         // --- the graph, on known inputs. Deterministic, so a failure here is a bug
         //     in the scoring rather than a property of whatever is in Downloads.
@@ -568,6 +607,20 @@ enum SelfTest {
         check("a snippet never includes the comment prompts",
               !(Search.matches("surprising", in: shelf).first?.snippet.contains("<!--") ?? true))
 
+        // Archived papers stay searchable — that is the deal archiving makes —
+        // but they yield to current papers within the same match rank.
+        var shelfWithArchived = shelf
+        var crossLingual = searchable("1710.04087",
+                                      "Subliminal word translation without parallel data")
+        crossLingual.archaic = true
+        shelfWithArchived.insert(crossLingual, at: 0)   // inserted FIRST, so order must be earned
+        let subliminal = Search.matches("subliminal", in: shelfWithArchived)
+        check("an archived paper is still findable",
+              subliminal.contains { $0.paper.arxivID == "1710.04087" })
+        check("but a current paper outranks it at the same field",
+              subliminal.first?.paper.arxivID == "2507.14805",
+              "both are title hits; the archived one was even listed first")
+
         // --- reading queue
         func lib(_ spec: [(String, Int)]) -> [Paper] {
             spec.map { var p = Paper(arxivID: $0.0); p.queuePosition = $0.1; return p }
@@ -617,6 +670,19 @@ enum SelfTest {
         check("queuing what is already first changes nothing",
               ReadingQueue.adding(["1000.00001"], to: three, atFront: true).isEmpty,
               "no write, so no commit")
+        check("queuing an unread paper clears its stamped read date", {
+            var p = Paper(arxivID: "1000.00007")
+            p.readOn = Date()                       // what add() stamps on arrival
+            return ReadingQueue.adding(["1000.00007"], to: [p], atFront: true)
+                .first.map { $0.readOn == nil && $0.queuePosition == 1 } ?? false
+        }(), "queued-and-read is a contradiction; the queue wins for a virgin note")
+        check("a paper with a real note keeps its read date when re-queued", {
+            var p = Paper(arxivID: "1000.00008")
+            p.readOn = Date()
+            p.body = Paper.template + "\nActually wrote something."
+            return ReadingQueue.adding(["1000.00008"], to: [p], atFront: true)
+                .first?.readOn != nil
+        }(), "a revisit is not a contradiction")
 
         let queueSorted = SortOrder.apply(.queue, to: lib([
             ("1000.00001", -1), ("1000.00002", 2), ("1000.00003", 1)]))
@@ -824,6 +890,17 @@ enum SelfTest {
         check("the qualifier survives in the reason",
               hedged.reason.contains("PROVISIONAL"),
               "the hedge is information, not noise")
+
+        // --- the judge's subprocess plumbing
+        // A pipe nobody reads holds 64 KB and then blocks the writer forever.
+        // 200 KB to stderr through the judge's own code path: if stderr is not
+        // being drained, the child never reaches its echo, the ten-second
+        // timeout fires, and this comes back nil instead of OK.
+        let chatty = Judge.run(executable: "/bin/bash",
+                               arguments: ["-c", "yes | head -c 200000 >&2; echo OK"],
+                               stdin: "", timeout: 10)
+        check("a child flooding stderr cannot deadlock the judge", chatty == "OK",
+              "stdout and stderr each drain on their own queue")
 
         // --- sort orders
         func dated(_ id: String, _ year: Int?, cites: Int = 0, read: Bool = false) -> Paper {

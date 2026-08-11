@@ -202,6 +202,9 @@ struct ContentView: View {
                                 if !hit.field.label.isEmpty {
                                     Text(hit.field.label).font(.system(size: 9))
                                 }
+                                if hit.paper.archaic {
+                                    Text("archived").font(.system(size: 9))
+                                }
                             }
                             .foregroundStyle(.tertiary)
                         }
@@ -418,7 +421,12 @@ struct NoteHeader: View {
                 }
                 if let y = paper.year { Text(String(y)) }
                 if !paper.venue.isEmpty { Text(paper.venue).lineLimit(1) }
-                Link("arXiv", destination: URL(string: "https://arxiv.org/abs/\(paper.arxivID)")!)
+                // Keyed off the id's shape: arXiv for arXiv ids, the Anthology for
+                // ACL ids, and no link at all for a hand-made key — a dead link
+                // dressed as a real one is worse than none.
+                if let url = paper.externalURL {
+                    Link(paper.externalLinkLabel, destination: url)
+                }
                 Spacer()
             }
             .font(.system(size: 10))
