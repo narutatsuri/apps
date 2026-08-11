@@ -9,6 +9,8 @@ struct FrontierApp: App {
         let args = Array(CommandLine.arguments.dropFirst())
         if args.contains("--selftest") { MainActor.assumeIsolated { SelfTest.run() } }
         MainActor.assumeIsolated { CLI.run(args) }
+        TitlebarZoom.install()
+        ZoomDiagnose.scheduleIfAsked()
     }
 
     var body: some Scene {
