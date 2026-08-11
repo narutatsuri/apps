@@ -39,33 +39,47 @@ enum ZoomDiagnose {
                          hit.map { String(describing: type(of: $0)) } ?? "nil"))
         }
 
-        // A real double-click, sent through the window at a clear stretch of bar.
-        let before = w.frame
-        let clickPoint = NSPoint(x: f.width * 0.45, y: f.height - 12)
-        for count in 1...2 {
-            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
-                if let e = NSEvent.mouseEvent(
-                    with: type, location: clickPoint,
-                    modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
-                    windowNumber: w.windowNumber, context: nil,
-                    eventNumber: 0, clickCount: count, pressure: 1) {
-                    // Through the app, not the window: local event monitors —
-                    // including the double-click fix under test — sit in
-                    // NSApplication's dispatch, and window.sendEvent skips them.
-                    NSApp.sendEvent(e)
+        // Double-clicks, sent through the app so the local monitor under test
+        // sees them (window.sendEvent skips NSApplication's dispatch).
+        func doubleClick(_ point: NSPoint) {
+            for count in 1...2 {
+                for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                    if let e = NSEvent.mouseEvent(
+                        with: type, location: point,
+                        modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                        windowNumber: w.windowNumber, context: nil,
+                        eventNumber: 0, clickCount: count, pressure: 1) {
+                        NSApp.sendEvent(e)
+                    }
                 }
             }
         }
+
+        // 1. A clear stretch of bar must zoom.
+        let before = w.frame
+        doubleClick(NSPoint(x: f.width * 0.45, y: f.height - 12))
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
             let after = w.frame
-            print("  after synthetic double-click: \(Int(after.width))x\(Int(after.height))"
-                  + "  changed=\(after != before)")
-            w.performZoom(nil)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                let zoomed = w.frame
-                print("  after performZoom: \(Int(zoomed.width))x\(Int(zoomed.height))"
-                      + "  changed=\(zoomed != after)")
-                exit(0)
+            print("  bar double-click: \(Int(after.width))x\(Int(after.height))"
+                  + "  zoomed=\(after != before)  (want true)")
+
+            // 2. The view-mode tabs must NOT zoom — a fast second click on a
+            //    tab used to be swallowed and sent the window full-height.
+            w.setFrame(NSRect(x: 200, y: 200, width: 1000, height: 700), display: true)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                let g = w.frame
+                doubleClick(NSPoint(x: g.width * 0.92, y: g.height - 12))
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    let tabbed = w.frame
+                    print("  tab double-click: \(Int(tabbed.width))x\(Int(tabbed.height))"
+                          + "  zoomed=\(tabbed != g)  (want false)")
+                    w.performZoom(nil)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                        let zoomed = w.frame
+                        print("  performZoom control: changed=\(zoomed != tabbed)")
+                        exit(0)
+                    }
+                }
             }
         }
     }

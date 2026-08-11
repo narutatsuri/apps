@@ -90,11 +90,56 @@ struct ContentView: View {
                 ForEach(model.ready.filter { !todayIDs.contains($0.id) }
                             .prefix(20)) { row($0) }
             }
+            // Every imported or followed course, as the whole path in its own
+            // reading order. This is where "where is the RLHF book and how do
+            // I get through it" is answered — Today and Ready gate what to do
+            // this morning, but the road itself was invisible before this.
+            Section("Courses") {
+                ForEach(courseGroups, id: \.name) { group in
+                    DisclosureGroup {
+                        ForEach(group.concepts) { row($0) }
+                    } label: {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(group.name)
+                                .font(.system(size: 11, weight: .medium)).lineLimit(1)
+                            Text("\(group.done) of \(group.concepts.count) learned")
+                                .font(.system(size: 9)).foregroundStyle(.tertiary)
+                        }
+                    }
+                }
+            }
             Section("Known — \(model.concepts.filter(\.isKnown).count)") {
                 ForEach(model.concepts.filter(\.isKnown).prefix(20)) { row($0) }
             }
         }
         .listStyle(.sidebar)
+    }
+
+    private struct CourseGroup {
+        let name: String
+        let concepts: [Concept]
+        let done: Int
+    }
+
+    /// Concepts grouped by the course that taught them, in the order they were
+    /// added — which for an imported resource is its own reading order, front
+    /// to back. Mark what you already know from the top and the frontier walks
+    /// the rest of it in sequence.
+    private var courseGroups: [CourseGroup] {
+        var byCourse: [String: [Concept]] = [:]
+        for c in model.concepts {
+            for name in c.courses { byCourse[name, default: []].append(c) }
+        }
+        return byCourse
+            .filter { $0.value.count >= 3 }
+            .map { name, list in
+                let ordered = list.sorted {
+                    $0.addedOn == $1.addedOn ? $0.id < $1.id : $0.addedOn < $1.addedOn
+                }
+                return CourseGroup(name: name, concepts: ordered,
+                                   done: list.filter(\.isKnown).count)
+            }
+            .sorted { $0.concepts.count > $1.concepts.count }
     }
 
     private func row(_ c: Concept) -> some View {

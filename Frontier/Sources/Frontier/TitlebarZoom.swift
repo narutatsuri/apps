@@ -25,15 +25,24 @@ enum TitlebarZoom {
             // The bar is everything above the content layout rect.
             guard event.locationInWindow.y >= window.contentLayoutRect.maxY else { return event }
 
-            // A double-click on an actual control belongs to the control.
-            if let frameView = window.contentView?.superview {
-                let p = frameView.convert(event.locationInWindow, from: nil)
-                var view = frameView.hitTest(p)
-                while let v = view {
-                    if v is NSControl { return event }
-                    view = v.superview
-                }
-            }
+            // Only the bar's own inert furniture may zoom — a whitelist, not an
+            // "is it a control" blacklist. SwiftUI's toolbar controls are not
+            // reliably NSControl subclasses, and the first version of this
+            // swallowed a quick second click on the view-mode tabs and zoomed
+            // the window instead: "clicking a tab went fullscreen vertically".
+            //
+            // hitTest takes the root view's own base coordinates here —
+            // verified empirically by ZoomDiagnose, whose bar probes only
+            // resolve to NSToolbarTitleView with the *unconverted* window
+            // location. convert(from: nil) flips y on the theme frame and
+            // quietly hit-tests the bottom of the window instead.
+            guard let frameView = window.contentView?.superview else { return event }
+            let hit = frameView.hitTest(event.locationInWindow)
+            let name = hit.map { String(describing: type(of: $0)) } ?? ""
+            let inert = hit === frameView
+                || name.contains("TitleView") || name.contains("FlexibleSpace")
+                || name.contains("ThemeFrame") || name.contains("Titlebar")
+            guard inert else { return event }
 
             // What the user asked double-click to mean, system-wide. "Fill" (new
             // in recent macOS) has no public API, so it gets zoom, the nearest
