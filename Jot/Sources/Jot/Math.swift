@@ -1,6 +1,27 @@
 import AppKit
 import WebKit
 
+/// The window the equations are laid out in, which must never be seen.
+///
+/// AppKit pulls a window back onto a display when it decides it has drifted off
+/// one. Right for a document window dragged half off the edge; wrong for a
+/// 2400×1200 measuring rig parked at -10000, which a screen-arrangement change
+/// was enough to deposit in the middle of a display as a flat slab of the paper
+/// colour, borderless and impossible to close.
+///
+/// This refuses the constraint. Measured: the same rect through a *titled*
+/// window comes back as (0, -251, 2400, 1200), which is all but exactly where
+/// the stray was found — (0, -218) — so that is the algorithm that moved it. A
+/// borderless window is not constrained by the direct call, so whether AppKit
+/// routes its own repositioning through this method could not be shown either
+/// way. It is cheap and it is the documented hook, so it is here; the defence
+/// that does not depend on knowing is `alphaValue = 0` at the call site.
+final class MeasuringWindow: NSWindow {
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
+        frameRect
+    }
+}
+
 /// Typesets `$x+y=1$` into something you can actually read.
 ///
 /// KaTeX in an offscreen web view, snapshotted to an image that goes into the
@@ -98,20 +119,55 @@ final class MathRenderer: NSObject {
         guard let root = Bundle.main.resourceURL?.appendingPathComponent("web") else { return }
         let view = WKWebView(frame: NSRect(x: 0, y: 0, width: 2400, height: 1200))
         view.navigationDelegate = self
-        // Snapshots of a view that has never been in a window come back blank on
-        // some macOS versions. An offscreen window costs nothing and is never
-        // ordered front, so it cannot steal focus.
-        let host = NSWindow(contentRect: view.frame, styleMask: [.borderless],
-                            backing: .buffered, defer: false)
+        // The view needs *a* window — a render of a view that has never had one
+        // comes back blank on some macOS versions — but the window is never
+        // ordered in. It is built, the view is added, and that is all.
+        //
+        // Being on screen at all was the whole problem. Ordered in and parked at
+        // -10000, macOS pulled it back onto a display whenever the screen
+        // arrangement changed: a 2400×1200 borderless slab, no title bar,
+        // nothing to close. Making it transparent stopped it being *seen* but
+        // not being *there* — it still landed across an external monitor's
+        // menu-bar strip, and a window under the menu bar changes how macOS
+        // tints it, which showed up as the menu bar glitching. A window that is
+        // never ordered in cannot be relocated onto anything and composites
+        // nothing. `createPDF` draws from the render tree rather than the
+        // screen, so it costs nothing to keep it off. The transparency and the
+        // rest stay as belt and braces.
+        let host = MeasuringWindow(contentRect: view.frame, styleMask: [.borderless],
+                                   backing: .buffered, defer: false)
         host.contentView?.addSubview(view)
+        host.alphaValue = 0
+        host.ignoresMouseEvents = true
+        host.hasShadow = false
+        host.isExcludedFromWindowsMenu = true
+        host.collectionBehavior = [.stationary, .ignoresCycle, .fullScreenNone]
         host.setFrameOrigin(NSPoint(x: -10000, y: -10000))
-        host.orderBack(nil)
         holder = host
         web = view
         view.loadFileURL(root.appendingPathComponent("math.html"), allowingReadAccessTo: root)
     }
 
     private var holder: NSWindow?
+
+    /// Whether the measuring window, once built, cannot be seen — checked by
+    /// `--selftest`, since "offscreen" is a position and positions get changed.
+    /// True before it exists, because a window that was never made cannot show.
+    static var measuringWindowIsInvisible: Bool {
+        guard let host = shared.holder else { return true }
+        // `isVisible` is the load-bearing one: a window that was never ordered
+        // in is not in the on-screen list, so no screen-arrangement change can
+        // drag it onto a display and nothing composites it under a menu bar.
+        return !host.isVisible && host.alphaValue == 0 && host.ignoresMouseEvents
+    }
+
+    /// `JOT_MATHWIN=<x>,<y>` parks the measuring window at a visible origin, so
+    /// the claim "it would not be seen even there" can be photographed rather
+    /// than asserted. Nothing calls this in normal use.
+    static func parkMeasuringWindow(at origin: NSPoint) {
+        shared.holder?.setFrameOrigin(origin)
+        shared.holder?.orderBack(nil)
+    }
 
     private func render(_ key: Key, _ done: @escaping () -> Void) {
         guard let web else { done(); return }

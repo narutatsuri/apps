@@ -50,6 +50,9 @@ enum Severity {
 struct ProviderSnapshot {
     var meters: [Meter] = []
     var plan: String?
+    /// Which login this is — the account's email — when a provider can have
+    /// more than one and "Codex" alone would not say.
+    var subtitle: String?
     var note: String?
     var error: String?
     var fetchedAt: Date?

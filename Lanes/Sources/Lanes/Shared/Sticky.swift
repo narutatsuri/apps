@@ -1,0 +1,1 @@
+../../../../Jot/Sources/Jot/Sticky.swift

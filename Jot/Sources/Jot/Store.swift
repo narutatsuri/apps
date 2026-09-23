@@ -89,7 +89,16 @@ final class Store {
     /// not a paragraph.
     func save(_ sticky: Sticky, debounce: TimeInterval = 0.6) {
         var s = sticky
-        s.updatedAt = Date()
+        // Only a change to the words is a change to the note.
+        //
+        // This used to stamp the time on every save, and saves happen for
+        // things that are not edits: moving a window, opening one, the app
+        // writing its state back at launch. The menu sorts on this field, so
+        // after a restart every note carried the same timestamp — measured, all
+        // three of them to the second — and the list order became arbitrary.
+        // The note you wrote last stopped being the one at the top, which is
+        // the only reason to sort by time at all.
+        if stickies[s.id]?.text != s.text { s.updatedAt = Date() }
         stickies[s.id] = s
 
         saveWork[s.id]?.cancel()
@@ -121,7 +130,7 @@ final class Store {
         // a stale store, an editor that had not loaded yet — destroyed the file
         // with no way back. It cost a real note. Deletion has exactly one
         // meaning here now, and it is recoverable.
-        guard !sticky.isBlank else {
+        if sticky.isBlank && !sticky.important {
             bin(sticky.id)
             return
         }
@@ -146,7 +155,12 @@ final class Store {
 
     /// Moves the file to `.trash` instead of deleting it. Recoverable by hand,
     /// which is the compromise that lets deletion be a single keystroke.
+    ///
+    /// An important note is refused here, not just hidden from in the view: the
+    /// view's missing button is courtesy, this is the guarantee, and it holds
+    /// for every caller there will ever be.
     func delete(_ id: String) {
+        guard stickies[id]?.important != true else { return }
         saveWork[id]?.cancel()
         saveWork[id] = nil
         bin(id)

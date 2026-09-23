@@ -29,15 +29,20 @@ enum Viridis {
         (0.135, 0.659, 0.518), (0.478, 0.821, 0.318), (0.993, 0.906, 0.144)
     ]
 
-    static func color(_ t: Double) -> Color {
+    /// The raw components, shared with the website export so the graph on the
+    /// site is the same ramp as the graph in the window.
+    static func rgb(_ t: Double) -> (r: Double, g: Double, b: Double) {
         let clamped = min(1, max(0, t))
         let scaled = clamped * Double(stops.count - 1)
         let i = min(stops.count - 2, Int(scaled))
         let f = scaled - Double(i)
         let a = stops[i], b = stops[i + 1]
-        return Color(.sRGB, red: a.0 + (b.0 - a.0) * f,
-                     green: a.1 + (b.1 - a.1) * f,
-                     blue: a.2 + (b.2 - a.2) * f, opacity: 1)
+        return (a.0 + (b.0 - a.0) * f, a.1 + (b.1 - a.1) * f, a.2 + (b.2 - a.2) * f)
+    }
+
+    static func color(_ t: Double) -> Color {
+        let c = rgb(t)
+        return Color(.sRGB, red: c.r, green: c.g, blue: c.b, opacity: 1)
     }
 }
 
@@ -233,12 +238,9 @@ struct GraphView: View {
     }
 
     private func label(_ paper: Paper) -> String {
-        let surname = paper.authors.first.map { name -> String in
-            name.contains(",")
-                ? String(name.split(separator: ",")[0])
-                : (name.split(separator: " ").last.map(String.init) ?? name)
-        } ?? paper.arxivID
-        return paper.year.map { "\(surname) \($0)" } ?? surname
+        // Same fallback chain as GraphExport.label: a metadata-less paper
+        // labels by its title's first word, not a bare arXiv id.
+        GraphExport.label(paper)
     }
 
     // MARK: - Drawing

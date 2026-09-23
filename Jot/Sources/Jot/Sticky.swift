@@ -45,6 +45,10 @@ struct Sticky: Identifiable, Equatable {
     /// Rendered rather than raw. Per sticky, because a checklist wants rendering
     /// and a paste buffer does not.
     var rendered: Bool = false
+    /// Never delete. While this is on there is no delete button, ⌘⌫ does
+    /// nothing, and the store refuses to bin the file — even emptied out. The
+    /// only way to delete an important note is to toggle this off first.
+    var important: Bool = false
     /// Was this on screen when you last quit?
     ///
     /// Explicit rather than inferred from "does it have a saved frame", which is
@@ -118,6 +122,7 @@ extension Sticky {
         out += "floats: \(floats)\n"
         out += "open: \(isOpen)\n"
         if rendered { out += "rendered: true\n" }
+        if important { out += "important: true\n" }
         out += "created: \(Self.iso.string(from: createdAt))\n"
         out += "updated: \(Self.iso.string(from: updatedAt))\n"
         out += "---\n\n"
@@ -152,6 +157,7 @@ extension Sticky {
         self.colour = StickyColour(rawValue: front["colour"] ?? "") ?? .yellow
         self.floats = (front["floats"] ?? "true") != "false"
         self.rendered = (front["rendered"] ?? "") == "true"
+        self.important = (front["important"] ?? "") == "true"
         // Absent means yes: a hand-written .md dropped into the folder should
         // show up, and so should every note made before this field existed.
         self.isOpen = (front["open"] ?? "true") != "false"

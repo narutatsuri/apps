@@ -35,6 +35,8 @@ enum Highlighter {
         /// `$x+y=1$` and `$$…$$`. The content is TeX, handed to KaTeX.
         case math(display: Bool)
         case link(url: String)
+        /// `![alt](path)`. The whole span; it collapses to the picture itself.
+        case image(alt: String, path: String)
         /// The `**`, `==`, `$` and `#` themselves. Deleted from what you see.
         case marker
         case listBullet
@@ -49,8 +51,11 @@ enum Highlighter {
         /// Line-level shape. Survives inside a verbatim span — a heading that
         /// happens to contain `$x$` is still a heading.
         case structural
-        /// Suppressed inside a verbatim span: the `*` in `$a^*$` is a
+        /// Suppressed *inside* a verbatim span: the `*` in `$a^*$` is a
         /// superscript, and the `**` in `` `a**b` `` is two literal asterisks.
+        /// May still *contain* one — `==the energy $E=mc^2$ matters==` is a
+        /// highlight with an equation in it, and both markers are outside the
+        /// maths. Straddling is the case that stays rejected.
         case inline
     }
 
@@ -85,6 +90,14 @@ enum Highlighter {
             (re(#"\$(?!\s)([^$\n]+?)(?<!\s)\$"#), .verbatim, { m, _ in
                 delimited(m, 1, [.math(display: false)])
             }),
+            // An image is verbatim like maths: the path is content, and the
+            // whole `![alt](path)` stands in for one picture. Verbatim also
+            // keeps the link pattern below from reading the `[alt](path)`
+            // inside it as a link — a link cannot straddle a claimed span.
+            (re(#"!\[([^\]\n]*)\]\(([^)\n]+)\)"#), .verbatim, { m, s in
+                [Style(range: m.range, kind: .image(alt: s.substring(with: m.range(at: 1)),
+                                                    path: s.substring(with: m.range(at: 2))))]
+            }),
             // The marker swallows the trailing space too, so a stripped heading
             // does not start with one.
             // (.+) not (.*): the hashes only come out once there is something
@@ -96,7 +109,13 @@ enum Highlighter {
                 return [Style(range: m.range(at: 1), kind: .marker),
                         Style(range: m.range(at: 2), kind: .heading(level: level))]
             }),
-            (re(#"==([^=\n]+)=="#), .inline, { m, _ in delimited(m, 2, [.highlight]) }),
+            // Lazy, not "anything but an equals sign". Excluding `=` stopped
+            // `==a== and ==b==` being read as one span from the first marker to
+            // the last, but it also meant no highlighted phrase could contain an
+            // equals sign at all — `==a = b==`, and every highlight wrapping an
+            // equation, silently failed to highlight and left its `==` on screen.
+            // Laziness handles the run-on case without forbidding a character.
+            (re(#"==([^\n]+?)=="#), .inline, { m, _ in delimited(m, 2, [.highlight]) }),
             // Bold-italic first: **bold** would otherwise eat the inner stars
             // and leave the outer ones stranded.
             (re(#"\*\*\*([^*\n]+)\*\*\*"#), .inline, { m, _ in
@@ -107,6 +126,16 @@ enum Highlighter {
                 delimited(m, 1, [.italic])
             }),
             (re(#"~~([^~\n]+)~~"#), .inline, { m, _ in delimited(m, 2, [.strikethrough]) }),
+            // A single tilde strikes out too. Two guards, both load-bearing:
+            // `(?<!~)…(?!~)` keeps it from matching the inside of `~~a~~` and
+            // leaving a stray marker, the same trick the single `*` uses against
+            // `**`; and refusing whitespace just inside the tildes is what stops
+            // "~/Developer and ~/Documents" striking out everything between two
+            // home directories, the same trick the `$` maths pattern uses
+            // against "$5 and $7".
+            (re(#"(?<!~)~(?!~|\s)([^~\n]+?)(?<!\s)~(?!~)"#), .inline, { m, _ in
+                delimited(m, 1, [.strikethrough])
+            }),
             (re(#"\[([^\]\n]+)\]\(([^)\n]+)\)"#), .inline, { m, s in
                 let text = m.range(at: 1)
                 return [Style(range: NSRange(location: m.range.location, length: 1), kind: .marker),
@@ -146,7 +175,14 @@ enum Highlighter {
                 case .structural:
                     rest.append(contentsOf: built)
                 case .inline:
-                    guard !overlaps(match.range, claimed) else { continue }
+                    // Containing a verbatim span is fine; straddling one is not.
+                    // The old test was plain overlap, which threw away any
+                    // emphasis that *wrapped* an equation — so `==a $x$ b==`
+                    // lost its highlight entirely and showed its own `==`.
+                    guard claimed.allSatisfy({
+                        NSIntersectionRange($0, match.range).length == 0
+                            || contains(match.range, $0)
+                    }) else { continue }
                     rest.append(contentsOf: built)
                 }
             }
@@ -156,5 +192,9 @@ enum Highlighter {
 
     private static func overlaps(_ range: NSRange, _ ranges: [NSRange]) -> Bool {
         ranges.contains { NSIntersectionRange($0, range).length > 0 }
+    }
+
+    private static func contains(_ outer: NSRange, _ inner: NSRange) -> Bool {
+        inner.location >= outer.location && NSMaxRange(inner) <= NSMaxRange(outer)
     }
 }

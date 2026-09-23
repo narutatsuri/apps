@@ -7,6 +7,16 @@ import CoreGraphics
 enum SelfTest {
     @MainActor
     static func run() -> Never {
+        // A private library for the whole run, set before anything touches
+        // `Library.root` (which is lazy, and nothing touches it earlier than
+        // this). The draft-loss probes below drive the real select/save path,
+        // and that path must never write into — or commit to — the actual
+        // notes repo. The temp folder is not a git repo, so the commit half of
+        // a save fails harmlessly there.
+        let tempLibrary = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("pn-selftest-\(getpid())")
+        setenv("PN_LIBROOT", tempLibrary.path, 1)
+
         var fails = 0
         func check(_ label: String, _ ok: Bool, _ detail: String = "") {
             print("\(ok ? "PASS" : "FAIL")  \(label)\(detail.isEmpty ? "" : " — \(detail)")")
@@ -57,6 +67,167 @@ enum SelfTest {
               back.confusions == "Why the proxy correlates at all.",
               "headings still locate their text")
         check("round-trip: pdf path", back.pdfPath == p.pdfPath)
+
+        // --- project tags
+        //
+        // The tag is a name in the paper's own frontmatter; projects.txt only
+        // supplies its colour. So the field has to survive the file round-trip,
+        // and an untagged paper must write no field at all — every note made
+        // before this existed still round-trips byte-identically.
+        var tagged = Paper(arxivID: "2507.14805")
+        tagged.project = "CoT monitorability"
+        check("round-trip: project survives",
+              Paper(markdown: tagged.markdown)?.project == "CoT monitorability")
+        check("an untagged paper carries no project field",
+              !Paper(arxivID: "2507.14805").markdown.contains("project:"),
+              "by default papers need no tag — the field exists only when set")
+        check("absent means untagged", back.project.isEmpty)
+
+        // --- the project registry
+        let registry = Projects.parse("""
+        # a comment, and a blank line below
+
+        blue CoT monitorability
+        Reasoning Robustness
+        teal Self-improvement
+        BLUE cot MONITORABILITY
+        """)
+        check("a colour word starts a line", registry.first?.colour == .blue
+              && registry.first?.name == "CoT monitorability")
+        check("a hand-written line without a colour is still a project",
+              registry.count > 1 && registry[1].name == "Reasoning Robustness",
+              "a registry that drops entries over a missing colour word loses "
+            + "the projects it exists to keep")
+        check("and it takes the least-used colour, not a duplicate",
+              registry.count > 1 && registry[1].colour == .red,
+              "got \(registry.count > 1 ? registry[1].colour.rawValue : "nothing")")
+        check("duplicate names collapse, case-insensitively",
+              registry.count == 3, "got \(registry.count)")
+        check("the registry round-trips through its own file format",
+              Projects.parse(Projects.serialise(registry)) == registry)
+        check("eight projects get eight different colours",
+              Set((0..<8).reduce(into: [Project]()) { acc, _ in
+                  acc.append(Project(name: "p\(acc.count)",
+                                     colour: Projects.nextColour(acc)))
+              }.map(\.colour)).count == 8,
+              "the least-used rule must cycle the palette before repeating")
+        check("every colour pairs a fill with an ink",
+              ProjectColour.allCases.allSatisfy { $0.fill != 0 && $0.ink != $0.fill })
+
+        // --- the sidebar's project filter
+        let mixedShelf: [Paper] = {
+            var x = Paper(arxivID: "f1"); x.project = "CoT monitorability"
+            var y = Paper(arxivID: "f2"); y.project = "Self-improvement"
+            let z = Paper(arxivID: "f3")
+            return [x, y, z]
+        }()
+        check("no filter shows the whole shelf",
+              Projects.papers(mixedShelf, matching: nil).count == 3)
+        check("a project filter shows that project, case-insensitively",
+              Projects.papers(mixedShelf, matching: "cot MONITORABILITY").map(\.arxivID) == ["f1"],
+              "the same rule the registry uses for duplicate names")
+        check("the untagged filter shows only untagged papers",
+              Projects.papers(mixedShelf, matching: "").map(\.arxivID) == ["f3"],
+              "an empty name means no project, not every project")
+
+        // --- the website graph export
+        //
+        // What leaves the machine is deliberately narrow: geometry, title, link,
+        // and the note's claim section. A hollow node on the site is a paper
+        // whose claim was never written — that distinction is data, so it is
+        // pinned here rather than left to the renderer's goodwill.
+        let webShelf: [Paper] = {
+            var x = Paper(arxivID: "2501.00001"); x.title = "Probe One"
+            x.year = 2025; x.citations = 100
+            x.refs = ["2501.00002", "1111.11111"]
+            x.body = "## Claim, in my words\n\nIt scales, but only sideways.\n\n## Evidence\n"
+            var y = Paper(arxivID: "2501.00002"); y.title = "Probe Two"; y.year = 2024
+            var z = Paper(arxivID: "2501.00003"); z.title = "Probe Three (archived)"
+            z.archaic = true
+            return [x, y, z]
+        }()
+        let graph = GraphExport.payload(for: webShelf)
+        let gNodes = graph["nodes"] as? [[String: Any]] ?? []
+        let gEdges = graph["edges"] as? [[Any]] ?? []
+        check("archived papers stay out of the exported graph",
+              gNodes.map { $0["id"] as? String } == ["2501.00001", "2501.00002"],
+              "same rule as the graph window")
+        check("a written claim travels as the summary",
+              gNodes.first?["summary"] as? String == "It scales, but only sideways.")
+        check("an unwritten note exports an empty summary, not the template",
+              gNodes.last?["summary"] as? String == "",
+              "the template's prompts are scaffolding; empty is what draws hollow")
+        check("a free-form note's prose is its summary",
+              { var p = Paper(arxivID: "x")
+                p.body = "<!-- imported -->\n\nJust prose, no headings."
+                return p.webSummary == "Just prose, no headings." }(),
+              "79 notes are the old website summaries, imported without headings")
+        check("a free-form note may use headings of its own",
+              { var p = Paper(arxivID: "x")
+                p.body = "## Setup\n\nThe old site summaries have structure."
+                return p.webSummary == "The old site summaries have structure." }(),
+              "only the template's own Claim heading marks a note as templated")
+        check("working notes under other headings are not a summary",
+              { var p = Paper(arxivID: "x")
+                p.body = "## Claim, in my words\n\n## What I didn't understand\n\nwhy it converges"
+                return p.webSummary.isEmpty }(),
+              "confusions are candid and stay off the web")
+
+        // --- the current template: Summary + Questions/Comments
+        //
+        // Five notes were hand-written in this shape before it became the
+        // template, and under the old export rule their whole prose — candid
+        // comments included — was headed for the website. The summary is the
+        // Summary section, full stop.
+        check("the fresh template is the two-heading one",
+              Paper.template.contains("## Summary")
+              && Paper.template.contains("## Questions/Comments")
+              && !Paper.template.contains("Claim, in my words"))
+        check("an untouched new template is not a note yet",
+              !Paper(arxivID: "x").isSubstantive,
+              "headings alone must not count as written")
+        var newNote = Paper(arxivID: "2509.00001")
+        newNote.body = "## Summary\n\nA tidy result about scaling.\n\n"
+            + "## Questions/Comments\n\n- Why only 3B models?\n- This feels underpowered."
+        check("the Summary section is the web summary — nothing else",
+              newNote.webSummary == "A tidy result about scaling.",
+              "questions and comments are working notes and stay off the web")
+        check("questions and comments reach the grader whole",
+              newNote.questions.confusionSection.contains("Why only 3B models?")
+              && newNote.questions.confusionSection.contains("underpowered")
+              && newNote.questions.count == 2,
+              "a comment without a question mark is still worth an answer")
+        check("questions without a summary draw hollow and leak nothing",
+              { var p = Paper(arxivID: "x")
+                p.body = "## Summary\n\n## Questions/Comments\n\n- What is the baseline?"
+                return p.webSummary.isEmpty }())
+        check("a metadata-less paper labels by its title, not a bare id",
+              { var p = Paper(arxivID: "2507.14805")
+                p.title = "GenEnv: Difficulty-Aligned Coevolution"; p.year = 2025
+                return GraphExport.label(p) == "GenEnv 2025" }(),
+              "the site showed '2507.14805 2025' as a label, which reads as a glitch")
+        check("a short first word takes the next word with it",
+              { var p = Paper(arxivID: "x"); p.title = "How Well Do Models Follow"
+                return GraphExport.label(p) == "How Well" }(),
+              "a graph dotted with 'How' and 'From' names nothing")
+        check("a leading article is not a name",
+              { var p = Paper(arxivID: "x"); p.title = "The Anatomy of Reward Hacking"
+                return GraphExport.label(p) == "Anatomy" }())
+        check("citing papers are connected",
+              gEdges.contains { ($0[0] as? Int) == 0 && ($0[1] as? Int) == 1 },
+              "got \(gEdges)")
+        check("every node lands on the canvas",
+              gNodes.allSatisfy {
+                  let x = $0["x"] as? Double ?? -1, y = $0["y"] as? Double ?? -1
+                  return x >= 0 && x <= 1000 && y >= 0 && y <= 620
+              })
+        check("the export is deterministic",
+              GraphExport.text(for: webShelf, wrap: false)
+                  == GraphExport.text(for: webShelf, wrap: false),
+              "the same library must produce the same bytes, or every export is a diff")
+        check("the .js wrapping assigns the global the site reads",
+              GraphExport.text(for: webShelf, wrap: true)
+                  .hasPrefix("window.READING_GRAPH = {"))
 
         // --- archived papers
         var archived = Paper(arxivID: "2010.06189")
@@ -114,6 +285,12 @@ enum SelfTest {
 
         // --- id handling
         check("version suffix stripped", PDFRefs.normalise("2510.23966v3") == "2510.23966")
+        check("a .pdf extension is not part of an id",
+              PDFRefs.normalise("2510.23966v2.pdf") == "2510.23966",
+              "27 papers dragged in as '<id>.pdf' kept the extension in their key: "
+            + "no metadata, no arXiv link, no citation edges")
+        check("an ACL id is not eaten by the .pdf rule",
+              PDFRefs.normalise("2021.emnlp-main.70") == "2021.emnlp-main.70")
         check("arXiv prefix stripped", PDFRefs.normalise("arXiv:2510.23966") == "2510.23966")
         check("id from descriptive filename",
               PDFRefs.idFromFilename("Adaptive_Attacks__2510.09462.pdf") == "2510.09462")
@@ -986,6 +1163,225 @@ enum SelfTest {
                 if rel.isEmpty { print("      └─ (none)") }
             }
         }
+
+        // --- unsaved edits survive leaving the note
+        //
+        // The bug this pins down: the draft lived only in memory and ⌘S was
+        // the only path to disk, so clicking a different paper — or any
+        // background refresh landing mid-sentence — silently reset the note
+        // to the template. It cost a real note. These probes drive the actual
+        // AppModel select/flush path, inside the temp library set up at the top.
+        let model = AppModel.shared
+        try? FileManager.default.createDirectory(at: Library.papersDir,
+                                                 withIntermediateDirectories: true)
+        var probeA = Paper(arxivID: "st-draft-a"); probeA.title = "Draft probe A"
+        var probeB = Paper(arxivID: "st-draft-b"); probeB.title = "Draft probe B"
+        for probe in [probeA, probeB] {
+            try? probe.markdown.write(
+                to: Library.papersDir.appendingPathComponent(probe.filename),
+                atomically: true, encoding: .utf8)
+        }
+        Library.shared.reload()
+        model.select("st-draft-a")
+        check("the draft probe came up", model.draft?.arxivID == "st-draft-a")
+
+        model.draft?.body = "words typed and never explicitly saved"
+        model.draft?.verdict = .gold
+        model.select("st-draft-b")
+        let flushed = Library.shared.paper(withID: "st-draft-a")
+        check("leaving a note writes the edits through",
+              flushed?.body == "words typed and never explicitly saved",
+              "clicking another paper used to discard the draft outright")
+        check("the verdict travels with them", flushed?.verdict == .gold,
+              "the picker wrote only to memory too")
+
+        model.select("st-draft-a")
+        check("coming back shows the words, not the template",
+              model.draft?.body == "words typed and never explicitly saved")
+
+        model.draft?.body = "a second burst of typing"
+        model.refresh()
+        check("a background refresh cannot clobber the draft",
+              model.draft?.body == "a second burst of typing",
+              "refresh reloads the draft from disk, so the flush must run first")
+
+        // The flush writes only what the editor owns: a queue position that
+        // landed on disk after the draft was loaded must survive the flush.
+        if var q = Library.shared.paper(withID: "st-draft-a") {
+            q.queuePosition = 3
+            Library.shared.save(q, commit: false)
+        }
+        model.draft?.body = "a third burst"
+        model.flushDraft()
+        check("the flush does not write the draft's stale fields over disk",
+              Library.shared.paper(withID: "st-draft-a")?.queuePosition == 3,
+              "writing the whole draft would undo whatever landed since it loaded")
+
+        // --- scoped recommendations
+        //
+        // The Next window can recommend for the whole library, one project,
+        // or the trail from a single paper. The scope is what the sources,
+        // the seeds and the judge all read, so it is pinned here.
+        let scopedShelf: [Paper] = {
+            var a = Paper(arxivID: "2501.11111"); a.project = "Chunky RL"
+            var b = Paper(arxivID: "2501.22222"); b.project = "chunky rl"
+            var c = Paper(arxivID: "2501.33333"); c.archaic = true
+            let d = Paper(arxivID: "2501.44444")
+            return [a, b, c, d]
+        }()
+        check("the library scope keeps the archaic filter",
+              Recommender.scoped(scopedShelf, to: .library).map(\.arxivID)
+                  == ["2501.11111", "2501.22222", "2501.44444"],
+              "old reading is not evidence of what to read next")
+        check("a project scope is its papers, case-insensitively",
+              Recommender.scoped(scopedShelf, to: .project("CHUNKY rl")).map(\.arxivID)
+                  == ["2501.11111", "2501.22222"])
+        check("a paper scope is that paper, even archived",
+              Recommender.scoped(scopedShelf, to: .paper("2501.33333v2")).map(\.arxivID)
+                  == ["2501.33333"],
+              "asking what follows a paper is a question about that paper")
+        check("the citing bar drops with the scope",
+              Recommender.minimumCiting(for: .library, count: 100) == 3
+              && Recommender.minimumCiting(for: .paper("x"), count: 1) == 1
+              && Recommender.minimumCiting(for: .project("p"), count: 2) == 1
+              && Recommender.minimumCiting(for: .project("p"), count: 6) == 2,
+              "one paper cannot agree with itself three times")
+
+        // --- web pages as entries
+        //
+        // A blog post becomes a hand-keyed paper: URL-slug key, the page's own
+        // title/author/date, and a stored source URL. The parsers are pure so
+        // they run here against captured pages; the network half is what
+        // --peek-url exists to check by hand.
+        let lwURL = URL(string: "https://www.lesswrong.com/posts/munJKF7iWMsWJLAH2/"
+            + "astra-and-fable-still-hack-on-simple-variants-of-alignment")!
+        check("a blog URL is ingestable, an arXiv URL is not",
+              WebIngest.ingestableURL(lwURL.absoluteString) != nil
+              && WebIngest.ingestableURL("https://arxiv.org/abs/2510.23966") == nil
+              && WebIngest.ingestableURL("2510.23966") == nil,
+              "arXiv URLs must keep resolving to real paper keys")
+        check("the key comes from the slug, not the random document id",
+              WebIngest.key(for: lwURL) == "lesswrong-astra-and-fable-still-hack-on",
+              "got \(WebIngest.key(for: lwURL))")
+        check("the ForumMagnum post id is found",
+              WebIngest.forumMagnumPostID(lwURL) == "munJKF7iWMsWJLAH2")
+
+        // The actual reply the LessWrong API gave for that post, captured.
+        let lwReply = """
+        {"data":{"post":{"result":{"title":"Astra and Fable still hack on simple \
+        variants of alignment evals from 2025 ","postedAt":"2026-09-08T15:05:00.657Z",\
+        "user":{"displayName":"Dean Valentine"},"coauthors":[]}}}}
+        """.data(using: .utf8)!
+        let lw = WebIngest.parseForumMagnum(lwReply)
+        check("the LessWrong reply parses whole",
+              lw?.title == "Astra and Fable still hack on simple variants of alignment evals from 2025"
+              && lw?.authors == ["Dean Valentine"]
+              && lw?.published != nil,
+              "got \(String(describing: lw))")
+
+        let generic = """
+        <html><head><title>Fallback &amp; Ignored</title>
+        <script type="application/ld+json">
+        {"@type":"BlogPosting","headline":"The Real Headline","datePublished":"2026-03-04",
+         "author":[{"@type":"Person","name":"Ada Lovelace"},{"name":"Alan Turing"}]}
+        </script></head></html>
+        """
+        let ld = WebIngest.metadata(fromHTML: generic)
+        check("JSON-LD wins over the title element",
+              ld.title == "The Real Headline" && ld.authors == ["Ada Lovelace", "Alan Turing"],
+              "got \(ld.title) / \(ld.authors)")
+        check("a plain date parses", ld.published != nil)
+
+        let ogOnly = """
+        <meta content="Reversed &#39;Order&#39; Post" property="og:title">
+        <meta name="author" content="Grace Hopper">
+        <meta property="article:published_time" content="2026-01-15T09:00:00Z">
+        """
+        let og = WebIngest.metadata(fromHTML: ogOnly)
+        check("OpenGraph carries the day when there is no JSON-LD",
+              og.title == "Reversed 'Order' Post" && og.authors == ["Grace Hopper"]
+              && og.published != nil,
+              "attribute order varies by site, and entities appear in real titles")
+        check("a page with nothing declared still yields its title element",
+              WebIngest.metadata(fromHTML: "<title>Just a Title</title>").title == "Just a Title")
+
+        var web = Paper(arxivID: "lesswrong-astra-and-fable-still-hack-on")
+        web.title = "Astra and Fable still hack"
+        web.sourceURL = lwURL.absoluteString
+        web.publishedOn = WebIngest.parseDate("2026-09-08T15:05:00.657Z")
+        let webBack = Paper(markdown: web.markdown)
+        check("round-trip: source URL and published date survive",
+              webBack?.sourceURL == web.sourceURL && webBack?.publishedOn != nil)
+        check("papers never grow url or published fields",
+              !Paper(arxivID: "2510.23966").markdown.contains("url:")
+              && !Paper(arxivID: "2510.23966").markdown.contains("published:"),
+              "every pre-existing file must stay byte-identical")
+        check("a web entry links to its source, labeled by host",
+              web.externalURL?.absoluteString == lwURL.absoluteString
+              && web.externalLinkLabel == "lesswrong.com")
+        check("a web entry sorts by its declared month",
+              web.published == (2026, 9),
+              "the id carries no date, so without this it sinks to the bottom")
+
+        // --- repairing a .pdf-keyed paper
+        //
+        // Offline (fetchMetadata: false): what must survive a re-key is the
+        // note text, the project tag, and the file being replaced rather than
+        // duplicated.
+        var broken = Paper(arxivID: "2510.11111v2.pdf")
+        broken.body = "## Summary\n\nWords that must survive the re-key."
+        broken.project = "Chunky RL"
+        try? broken.markdown.write(
+            to: Library.papersDir.appendingPathComponent(broken.filename),
+            atomically: true, encoding: .utf8)
+        Library.shared.reload()
+        let repair = Commands.repairCore(fetchMetadata: false)
+        check("the broken key is repaired", repair.rekeyed == 1,
+              "got \(repair)")
+        let fixedPaper = Library.shared.paper(withID: "2510.11111")
+        check("the repaired paper answers to its clean id",
+              fixedPaper?.arxivID == "2510.11111"
+              && fixedPaper?.isArxiv == true,
+              "isArxiv is what turns the arXiv link and metadata lookups back on")
+        check("its words and project tag survived",
+              fixedPaper?.body.contains("Words that must survive") == true
+              && fixedPaper?.project == "Chunky RL")
+        check("the old file is gone, not duplicated",
+              (try? FileManager.default.contentsOfDirectory(atPath: Library.papersDir.path))?
+                  .filter { $0.hasPrefix("2510.11111") }.count == 1)
+        check("running the repair again finds nothing to do",
+              Commands.repairCore(fetchMetadata: false).rekeyed == 0)
+
+        // --- projects can be recoloured and deleted after the fact
+        var projProbe = Paper(arxivID: "st-proj-a"); projProbe.title = "Project probe"
+        try? projProbe.markdown.write(
+            to: Library.papersDir.appendingPathComponent(projProbe.filename),
+            atomically: true, encoding: .utf8)
+        Library.shared.reload()
+        model.refresh()
+        model.newProjectTargets = ["st-proj-a"]
+        model.createProject(named: "Doomed", colour: .red)
+        check("the project exists and its paper is tagged",
+              model.project(named: "Doomed")?.colour == .red
+              && Library.shared.paper(withID: "st-proj-a")?.project == "Doomed")
+        model.recolour(project: "doomed", to: .teal)
+        check("a project's colour can change after it is made, case-insensitively",
+              model.project(named: "Doomed")?.colour == .teal
+              && Projects.load().first { $0.name == "Doomed" }?.colour == .teal,
+              "the registry on disk carries the new colour")
+        check("deleting counts what it will untag",
+              model.papers(inProject: "Doomed") == ["st-proj-a"])
+        model.deleteProject(named: "Doomed")
+        check("a deleted project is gone from the registry",
+              model.project(named: "Doomed") == nil && !Projects.load().contains { $0.name == "Doomed" })
+        check("and its papers are untagged, not deleted",
+              Library.shared.paper(withID: "st-proj-a") != nil
+              && Library.shared.paper(withID: "st-proj-a")?.project == "",
+              "the tag leaves the file; the paper stays")
+
+        model.draft = nil
+        model.selectedID = nil
+        try? FileManager.default.removeItem(at: tempLibrary)
 
         print(fails == 0 ? "\nALL PASS" : "\n\(fails) FAILURE(S)")
         exit(fails == 0 ? 0 : 1)

@@ -18,6 +18,39 @@ enum Recommender {
     /// evidence: left in, a stretch of old cross-lingual work pulls every
     /// recommendation back toward a field the library has left. Separated out
     /// so the rule can be tested without spending a minute on the network.
+    /// What the recommendations are *for*: everything you read, one project's
+    /// papers, or the trail leading on from a single paper.
+    enum Scope: Equatable, Hashable {
+        case library
+        case project(String)
+        case paper(String)
+    }
+
+    /// The papers a scope covers. The whole-library scope keeps the archaic
+    /// filter — old reading is not evidence of what to read next — but an
+    /// explicit scope skips it: asking what follows a specific paper is a
+    /// question about that paper, archived or not.
+    static func scoped(_ papers: [Paper], to scope: Scope) -> [Paper] {
+        switch scope {
+        case .library:
+            return eligible(papers)
+        case .project(let name):
+            return Projects.papers(papers, matching: name)
+        case .paper(let id):
+            let target = PDFRefs.normalise(id)
+            return papers.filter { PDFRefs.normalise($0.arxivID) == target }
+        }
+    }
+
+    /// How many of the scope's papers must cite a candidate before it counts.
+    /// Three across the whole library; a single paper cannot clear that bar,
+    /// so a scoped run mines the bibliography at one (two once the project is
+    /// big enough for agreement to mean something).
+    static func minimumCiting(for scope: Scope, count: Int) -> Int {
+        if case .library = scope { return 3 }
+        return count >= 4 ? 2 : 1
+    }
+
     static func eligible(_ papers: [Paper], includeArchaic: Bool = false) -> [Paper] {
         includeArchaic ? papers : papers.filter { !$0.archaic }
     }

@@ -33,6 +33,42 @@ final class MathSpec: NSObject {
     override var hash: Int { tex.hashValue ^ (display ? 1 : 0) }
 }
 
+/// A picture standing in for the `![alt](path)` that produced it.
+final class ImageSpec: NSObject {
+    let alt: String
+    let path: String
+    init(alt: String, path: String) { self.alt = alt; self.path = path }
+
+    override func isEqual(_ object: Any?) -> Bool {
+        guard let other = object as? ImageSpec else { return false }
+        return alt == other.alt && path == other.path
+    }
+    override var hash: Int { alt.hashValue ^ path.hashValue }
+}
+
+/// An image in the text. It sizes itself at layout time to the column it is
+/// in — as wide as the text, less a margin either side, aspect kept, never
+/// scaled up — so a picture fits whatever column holds it and re-fits when
+/// that column is dragged wider or narrower.
+final class ImageAttachment: NSTextAttachment {
+    /// The file's own size; nil for the stand-in drawn for a missing file,
+    /// which keeps whatever bounds it was given.
+    var naturalSize: NSSize?
+
+    override func attachmentBounds(for textContainer: NSTextContainer?,
+                                   proposedLineFragment lineFrag: CGRect,
+                                   glyphPosition position: CGPoint,
+                                   characterIndex charIndex: Int) -> CGRect {
+        guard let natural = naturalSize, natural.width > 0 else { return bounds }
+        let padding = textContainer?.lineFragmentPadding ?? 5
+        let columnWidth = textContainer?.size.width ?? lineFrag.width
+        let available = columnWidth - 2 * padding - 2 * Attributed.imageMargin
+        let width = min(natural.width, max(40, available))
+        let height = width * natural.height / natural.width
+        return CGRect(x: 0, y: -2, width: floor(width), height: floor(height))
+    }
+}
+
 /// Markdown in, styled text out, and back again without loss.
 ///
 /// This is the whole trick behind markers that vanish. The text view holds
@@ -49,6 +85,14 @@ enum Attributed {
     static let headingKey = NSAttributedString.Key("jot.heading")
     static let linkKey = NSAttributedString.Key("jot.link")
     static let mathKey = NSAttributedString.Key("jot.math")
+    static let imageKey = NSAttributedString.Key("jot.image")
+
+    /// How an image path becomes a picture. The default takes the path as it
+    /// is; an app whose notes keep images somewhere of their own (Lanes keeps
+    /// them in `_assets/`) installs a resolver that knows where to look.
+    static var imageResolver: (String) -> NSImage? = { NSImage(contentsOfFile: $0) }
+    /// Breathing room either side of a picture, inside the column's own inset.
+    nonisolated static let imageMargin: CGFloat = 8
 
     static let baseSize: CGFloat = 13
     static var base: NSFont { .monospacedSystemFont(ofSize: baseSize, weight: .regular) }
@@ -64,6 +108,7 @@ enum Attributed {
         var heading: [Int]
         var link: [String?]
         var math: [MathSpec?]
+        var image: [ImageSpec?]
         var bullet: [Bool]
         var quote: [Bool]
     }
@@ -76,6 +121,7 @@ enum Attributed {
                             heading: .init(repeating: 0, count: n),
                             link: .init(repeating: nil, count: n),
                             math: .init(repeating: nil, count: n),
+                            image: .init(repeating: nil, count: n),
                             bullet: .init(repeating: false, count: n),
                             quote: .init(repeating: false, count: n))
 
@@ -98,6 +144,9 @@ enum Attributed {
             case .math(let display):
                 let spec = MathSpec(tex: ns.substring(with: r), display: display)
                 for i in indices { out.math[i] = spec }
+            case .image(let alt, let path):
+                let spec = ImageSpec(alt: alt, path: path)
+                for i in indices { out.image[i] = spec }
             }
         }
         return out
@@ -119,13 +168,25 @@ enum Attributed {
             if let spec = sem.math[i] {
                 var j = i
                 while j < n, sem.math[j] === spec { j += 1 }
-                out.append(mathRun(spec, ink: ink, paper: paper))
+                // The enclosing emphasis travels with the equation. Without it a
+                // highlight that wraps one has a hole where the maths is, and —
+                // worse — the markdown written back out breaks the run in two.
+                out.append(mathRun(spec, style: sem.style[i], ink: ink, paper: paper))
+                i = j
+                continue
+            }
+
+            // So does a picture: one character, the image itself.
+            if let spec = sem.image[i] {
+                var j = i
+                while j < n, sem.image[j] === spec { j += 1 }
+                out.append(imageRun(spec, style: sem.style[i], ink: ink))
                 i = j
                 continue
             }
 
             var j = i
-            while j < n, !sem.isMarker[j], sem.math[j] == nil,
+            while j < n, !sem.isMarker[j], sem.math[j] == nil, sem.image[j] == nil,
                   sem.style[j] == sem.style[i], sem.heading[j] == sem.heading[i],
                   sem.link[j] == sem.link[i], sem.bullet[j] == sem.bullet[i],
                   sem.quote[j] == sem.quote[i] { j += 1 }
@@ -142,14 +203,100 @@ enum Attributed {
     }
 
     /// One attachment character standing in for an equation.
-    static func mathRun(_ spec: MathSpec, ink: NSColor, paper: NSColor) -> NSAttributedString {
+    static func mathRun(_ spec: MathSpec, style: InlineStyle = [],
+                        ink: NSColor, paper: NSColor) -> NSAttributedString {
         let attachment = MathAttachment()
         let rendered = MathRenderer.shared.rendering(tex: spec.tex, display: spec.display,
-                                                     size: baseSize, ink: ink, paper: paper)
+                                                     size: baseSize, ink: ink,
+                                                     paper: mathPaper(style: style, paper: paper))
         apply(rendered, to: attachment, spec: spec, ink: ink)
         let out = NSMutableAttributedString(attachment: attachment)
-        out.addAttributes([mathKey: spec, .foregroundColor: ink], range: NSRange(location: 0, length: out.length))
+        var attrs: [NSAttributedString.Key: Any] = [mathKey: spec, .foregroundColor: ink]
+        attrs.merge(mathAttributes(style: style)) { _, new in new }
+        out.addAttributes(attrs, range: NSRange(location: 0, length: out.length))
         return out
+    }
+
+    /// One attachment character standing in for a picture: the file, scaled to
+    /// fit the column, or — when the path leads nowhere — its alt text and
+    /// path drawn in place, so a missing file reads as missing rather than as
+    /// nothing having been there.
+    static func imageRun(_ spec: ImageSpec, style: InlineStyle = [], ink: NSColor) -> NSAttributedString {
+        let attachment = ImageAttachment()
+        if let image = imageResolver(spec.path), image.size.width > 0 {
+            attachment.image = image
+            attachment.naturalSize = image.size
+            // The real bounds come from the column at layout time; these are
+            // for anywhere that never lays out.
+            attachment.bounds = NSRect(x: 0, y: -2, width: image.size.width, height: image.size.height)
+        } else {
+            let label = NSAttributedString(
+                string: "⚠︎ " + (spec.alt.isEmpty ? spec.path : "\(spec.alt) (\(spec.path))"),
+                attributes: [.font: NSFontManager.shared.convert(base, toHaveTrait: .italicFontMask),
+                             .foregroundColor: ink.withAlphaComponent(0.55)])
+            let size = label.size()
+            let image = NSImage(size: NSSize(width: ceil(size.width), height: ceil(size.height)))
+            image.lockFocus()
+            label.draw(at: .zero)
+            image.unlockFocus()
+            attachment.image = image
+            attachment.bounds = NSRect(x: 0, y: -3, width: image.size.width, height: image.size.height)
+        }
+        let out = NSMutableAttributedString(attachment: attachment)
+        var attrs: [NSAttributedString.Key: Any] = [imageKey: spec, .foregroundColor: ink]
+        attrs.merge(mathAttributes(style: style)) { _, new in new }
+        out.addAttributes(attrs, range: NSRange(location: 0, length: out.length))
+        return out
+    }
+
+    /// The colour an equation is drawn *against*.
+    ///
+    /// An equation is not glyphs, it is a picture: KaTeX renders it in a web
+    /// view over an opaque background and the result is captured as an image.
+    /// So a `.backgroundColor` behind the attachment is painted over by the
+    /// image itself — a highlight that wrapped an equation came out with a
+    /// rectangular hole where the maths was. Pixel-checked; it is not a thing
+    /// you can reason your way to from the attribute being set correctly. The
+    /// highlight therefore has to go into the render, not behind it.
+    static func mathPaper(style: InlineStyle, paper: NSColor) -> NSColor {
+        guard style.contains(.highlight) else { return paper }
+        return composite(Theme.highlightTint, over: paper)
+    }
+
+    /// A translucent colour flattened onto an opaque one. The renderer wants a
+    /// solid background, and the highlight tint is deliberately see-through.
+    private static func composite(_ top: NSColor, over base: NSColor) -> NSColor {
+        guard let t = top.usingColorSpace(.sRGB), let b = base.usingColorSpace(.sRGB) else {
+            return base
+        }
+        let a = t.alphaComponent
+        return NSColor(srgbRed: t.redComponent * a + b.redComponent * (1 - a),
+                       green: t.greenComponent * a + b.greenComponent * (1 - a),
+                       blue: t.blueComponent * a + b.blueComponent * (1 - a),
+                       alpha: 1)
+    }
+
+    /// What an emphasis means when it lands on an equation.
+    ///
+    /// The style key is always carried, whether or not it changes how the
+    /// equation looks, because it is what `markdown(from:)` reads to put the
+    /// markers back — an equation inside `==…==` that forgot it was highlighted
+    /// would be written out as two highlights with a bare `$x$` between them.
+    ///
+    /// Only the attributes that mean something on a pre-rendered image are
+    /// applied: a background tint sits behind it, a strikethrough draws across
+    /// it. Bold and italic are deliberately not — the glyphs come from KaTeX as
+    /// a picture, and a font trait cannot reach inside one. `**$x$**` therefore
+    /// round-trips exactly and emboldens the words around the equation, and the
+    /// equation itself stays upright. Doing better means asking KaTeX for it.
+    static func mathAttributes(style: InlineStyle) -> [NSAttributedString.Key: Any] {
+        var attrs: [NSAttributedString.Key: Any] = [:]
+        if !style.isEmpty { attrs[styleKey] = style.rawValue }
+        if style.contains(.highlight) { attrs[.backgroundColor] = Theme.highlightTint }
+        if style.contains(.strikethrough) {
+            attrs[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
+        }
+        return attrs
     }
 
     /// Puts a rendering — or a stand-in, while KaTeX is still working — into an
@@ -225,18 +372,11 @@ enum Attributed {
 
     // MARK: - Styled text → markdown
 
-    /// The markers for a style set, innermost last so they nest predictably and
-    /// the parser reads back exactly what was written.
-    private static func wrap(_ style: InlineStyle) -> (open: String, close: String) {
-        var open = "", close = ""
-        for (member, marker) in [(InlineStyle.highlight, "=="), (.bold, "**"),
-                                 (.italic, "*"), (.strikethrough, "~~"), (.code, "`")]
-        where style.contains(member) {
-            open += marker
-            close = marker + close
-        }
-        return (open, close)
-    }
+    /// Marker nesting order, outermost first. One list, so the writer opens and
+    /// closes in an order the parser can read back.
+    private static let nesting: [(style: InlineStyle, marker: String)] =
+        [(.highlight, "=="), (.bold, "**"), (.italic, "*"),
+         (.strikethrough, "~~"), (.code, "`")]
 
     static func markdown(from attributed: NSAttributedString) -> String {
         let ns = attributed.string as NSString
@@ -284,26 +424,66 @@ enum Attributed {
         func math(_ at: Int) -> MathSpec? {
             attributed.attribute(mathKey, at: at, effectiveRange: nil) as? MathSpec
         }
+        func image(_ at: Int) -> ImageSpec? {
+            attributed.attribute(imageKey, at: at, effectiveRange: nil) as? ImageSpec
+        }
+
+        // Markers are opened and closed as the style *changes*, rather than
+        // wrapped around every run. Wrapping each run separately doubled the
+        // markers wherever emphasis nested: `==a **b** c==` was written back as
+        // `==a ====**b**==== c==`, because the middle run carried both styles
+        // and re-opened the highlight it was already inside. That is a lossy
+        // round-trip in a notes app — the file on disk is rewritten into
+        // something you did not type — and it applied to any nesting at all,
+        // including a link inside a highlight.
+        //
+        // Runs are also grouped *across* equations, so an emphasis spanning one
+        // gets a single pair of markers instead of breaking in two around it.
+        var open: [(style: InlineStyle, marker: String)] = []
+
+        func closeDown(to keep: Int) {
+            while open.count > keep { out += open.removeLast().marker }
+        }
 
         while i < end {
-            if let spec = math(i) {
-                let fence = spec.display ? "$$" : "$"
-                out += fence + spec.tex + fence
-                i += 1
-                continue
-            }
+            let runStyle = style(i)
+            let runLink = link(i)
             var j = i
-            while j < end, math(j) == nil, style(j) == style(i), link(j) == link(i) { j += 1 }
+            while j < end, style(j) == runStyle, link(j) == runLink { j += 1 }
 
-            let text = ns.substring(with: NSRange(location: i, length: j - i))
-            let (open, close) = wrap(style(i))
-            if let url = link(i) {
-                out += open + "[" + text + "](" + url + ")" + close
-            } else {
-                out += open + text + close
+            // Keep the open markers this run is still inside; close the rest,
+            // innermost first, so they nest properly.
+            var keep = 0
+            while keep < open.count, runStyle.contains(open[keep].style) { keep += 1 }
+            closeDown(to: keep)
+            for entry in nesting
+            where runStyle.contains(entry.style) && !open.contains(where: { $0.style == entry.style }) {
+                out += entry.marker
+                open.append(entry)
             }
+
+            var text = ""
+            var k = i
+            while k < j {
+                if let spec = math(k) {
+                    let fence = spec.display ? "$$" : "$"
+                    text += fence + spec.tex + fence
+                    k += 1
+                } else if let spec = image(k) {
+                    text += "![" + spec.alt + "](" + spec.path + ")"
+                    k += 1
+                } else {
+                    var m = k
+                    while m < j, math(m) == nil, image(m) == nil { m += 1 }
+                    text += ns.substring(with: NSRange(location: k, length: m - k))
+                    k = m
+                }
+            }
+
+            out += runLink.map { "[" + text + "](" + $0 + ")" } ?? text
             i = j
         }
+        closeDown(to: 0)
         return out
     }
 }

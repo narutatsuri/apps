@@ -129,6 +129,45 @@ final class StickyWindow: NSWindowController, NSWindowDelegate {
         window?.level = floats ? .floating : .normal
     }
 
+    // MARK: - Snapping to the other notes
+
+    /// Which corner the current drag is pinned to, decided once when it starts.
+    /// Read per-step it would flip about as the pointer crosses the midline.
+    private var resizeAnchor = Snap.Anchor(fixedMinX: true, fixedMinY: true)
+
+    func windowWillStartLiveResize(_ notification: Notification) {
+        guard let window else { return }
+        resizeAnchor = Snap.Anchor.from(mouse: NSEvent.mouseLocation, in: window.frame)
+    }
+
+    /// A resize that comes close to another note's width takes that width.
+    ///
+    /// Only during a live resize: a programmatic `setFrame` — restoring a saved
+    /// frame at launch, say — is not someone reaching for an edge, and snapping
+    /// it would quietly rewrite the geometry the note was saved with.
+    func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
+        guard sender.inLiveResize else { return frameSize }
+        return Snap.resize(from: sender.frame, to: frameSize,
+                           anchor: resizeAnchor,
+                           others: Self.otherFrames(excluding: stickyID),
+                           minimum: sender.minSize)
+    }
+
+    /// The other notes worth lining up with: on screen, not this one, and on the
+    /// same display — a note on another monitor is not something you are
+    /// aligning to, and its edges would snag this one from across the desk.
+    static func otherFrames(excluding id: String) -> [CGRect] {
+        guard let mine = open[id]?.window else { return [] }
+        let screen = mine.screen
+        return open.values.compactMap { controller in
+            guard controller.stickyID != id,
+                  let window = controller.window, window.isVisible,
+                  screen == nil || window.screen == nil || window.screen == screen
+            else { return nil }
+            return window.frame
+        }
+    }
+
     // MARK: - NSWindowDelegate
 
     /// Position and size are part of the note. Recorded on every move so a

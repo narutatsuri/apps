@@ -52,6 +52,10 @@ struct Paper: Identifiable, Equatable {
     /// once there is more than one paper in it the order is the whole point.
     var queuePosition: Int = -1
     var tags: [String] = []
+    /// The project this paper belongs to, by name — a key into `projects.txt`.
+    /// Empty for most papers: a project tag is for the papers you are reading
+    /// *for* something, not a field every paper must fill in.
+    var project: String = ""
     /// arXiv ids extracted from this paper's bibliography. The graph is built from
     /// these, because the free APIs have no reference lists for recent preprints.
     var refs: [String] = []
@@ -59,6 +63,12 @@ struct Paper: Identifiable, Equatable {
     var body: String = Paper.template
     /// Set when the note came from a PDF, so it can be reopened for reading.
     var pdfPath: String = ""
+    /// Where a web entry (a blog post, say) came from. Empty for papers —
+    /// their link is derived from the id's shape. When set, this wins.
+    var sourceURL: String = ""
+    /// The publication date a web page declared for itself. Papers carry
+    /// their date inside the arXiv id; a blog post has to be told.
+    var publishedOn: Date?
     /// Times cited, from OpenAlex. Drives node size in the graph, the way
     /// Connected Papers sizes by citation count.
     var citations: Int = 0
@@ -117,12 +127,19 @@ struct Paper: Identifiable, Equatable {
     /// Where the paper lives on the open web, keyed off the id's shape. Nil for a
     /// hand-made key — a 1994 journal paper has no page worth guessing at.
     var externalURL: URL? {
+        if !sourceURL.isEmpty { return URL(string: sourceURL) }
         if isArxiv { return URL(string: "https://arxiv.org/abs/\(arxivID)") }
         if Self.isACLID(arxivID) { return URL(string: "https://aclanthology.org/\(arxivID)/") }
         return nil
     }
 
-    var externalLinkLabel: String { isArxiv ? "arXiv" : "ACL Anthology" }
+    var externalLinkLabel: String {
+        if !sourceURL.isEmpty {
+            return URL(string: sourceURL)?.host?
+                .replacingOccurrences(of: "www.", with: "") ?? "source"
+        }
+        return isArxiv ? "arXiv" : "ACL Anthology"
+    }
 
     /// What the badge shows. Yours wins whenever you have one; otherwise Claude's
     /// stands in, which is the whole point — the shelf is labelled without you
@@ -136,25 +153,14 @@ struct Paper: Identifiable, Equatable {
         verdict != .unset && appraisal != .unset && verdict != appraisal
     }
 
-    /// Prompts chosen because a summary structurally cannot answer them for you.
+    /// The shape the notes actually settled into — five recent notes were
+    /// written this way by hand before it became the template. The original
+    /// five-prompt template lives on in dozens of files, and everything that
+    /// parses notes still understands both.
     static let template = """
-    ## Claim, in my words
+    ## Summary
 
-    <!-- The argument as you'd tell a colleague — not the abstract. -->
-
-    ## Evidence — what convinced me, or didn't
-
-    <!-- Which result carries the claim? Sample size, baselines, seeds. -->
-
-    ## This would be wrong if
-
-    <!-- The assumption the whole thing rests on. -->
-
-    ## What I didn't understand
-
-    <!-- The most useful field here. Confusion is where the next paper comes from. -->
-
-    ## Connections
+    ## Questions/Comments
 
     """
 
@@ -179,6 +185,12 @@ struct Paper: Identifiable, Equatable {
     ///
     /// Old-style ids (cs/0601001) carry no date, so those fall back to `year`.
     var published: (year: Int, month: Int) {
+        // A declared date wins — that is how a blog post sorts among the
+        // papers of its month instead of falling to the bottom.
+        if let p = publishedOn {
+            let c = Calendar.current.dateComponents([.year, .month], from: p)
+            return (c.year ?? 0, c.month ?? 0)
+        }
         let digits = arxivID.prefix { $0.isNumber }
         if digits.count == 4, arxivID.dropFirst(4).first == ".",
            let yy = Int(digits.prefix(2)), let mm = Int(digits.suffix(2)),
@@ -232,6 +244,32 @@ struct Paper: Identifiable, Equatable {
 
     var confusions: String { section("What I didn't understand") }
 
+    /// What the website's graph shows on hover: the summary of the paper, and
+    /// nothing else. The claim section where one was written; for a free-form
+    /// note with no template headings — 79 of them were imported verbatim from
+    /// the site's old paper-summaries page — the whole prose *is* the summary.
+    /// A note that kept the template but left the claim empty has no summary,
+    /// however much sits under the other headings: evidence, confusions and
+    /// would-be-wrong-ifs are working notes, and they stay off the web.
+    var webSummary: String {
+        // Both templates this library has used, newest first.
+        let summary = section("Summary")
+        if !summary.isEmpty { return summary }
+        let claim = section("Claim, in my words")
+        if !claim.isEmpty { return claim }
+        // Template detection keys on the templates' own headings, not on any
+        // heading: imported summaries carry `##` sections of their own, and
+        // "contains ## " silently withheld 26 of them from the site. A
+        // templated note whose summary is unwritten exports nothing — the
+        // Questions/Comments section holds candid working notes (one begins
+        // "this paper studies a degenerate version"), and exporting whole
+        // prose was quietly carrying them toward the web.
+        if body.contains("## Summary") || body.contains("## Claim, in my words") {
+            return ""
+        }
+        return prose
+    }
+
     /// The note with its scaffolding removed — headings and the template's own
     /// comment prompts are furniture, not your writing. Searching the raw body
     /// means every paper in the library matches "as you'd tell a colleague".
@@ -244,11 +282,12 @@ struct Paper: Identifiable, Equatable {
 
     /// What you asked yourself while reading, for the grader to answer.
     ///
-    /// The whole "What I didn't understand" section counts, punctuation or not —
-    /// that heading exists to collect confusion, and "no idea why the proxy
-    /// correlates" is a question with a full stop on it. Anything ending in a
-    /// question mark elsewhere in the note counts too, since the good questions
-    /// tend to arrive while writing about something else.
+    /// The question-collecting sections count whole, punctuation or not — the
+    /// current template's "Questions/Comments" and the old template's "What I
+    /// didn't understand" both exist for exactly this, and "no idea why the
+    /// proxy correlates" is a question with a full stop on it. Anything ending
+    /// in a question mark elsewhere in the note counts too, since the good
+    /// questions tend to arrive while writing about something else.
     struct Questions: Equatable {
         var confusionSection = ""
         var elsewhere: [String] = []
@@ -265,19 +304,20 @@ struct Paper: Identifiable, Equatable {
     }
 
     var questions: Questions {
-        let confusion = confusions
-        let inConfusion = Set(confusion.components(separatedBy: "\n")
+        let collected = [section("Questions/Comments"), confusions]
+            .filter { !$0.isEmpty }.joined(separator: "\n")
+        let inCollected = Set(collected.components(separatedBy: "\n")
             .map { $0.trimmingCharacters(in: .whitespaces) })
         var elsewhere: [String] = []
         for raw in body.components(separatedBy: "\n") {
             let line = raw.trimmingCharacters(in: .whitespaces)
             guard line.hasSuffix("?") else { continue }
             // Headings and the template's own comment prompts are not your questions.
-            guard !line.hasPrefix("#"), !line.hasPrefix("<!--"), !inConfusion.contains(line)
+            guard !line.hasPrefix("#"), !line.hasPrefix("<!--"), !inCollected.contains(line)
             else { continue }
             elsewhere.append(line)
         }
-        return Questions(confusionSection: confusion, elsewhere: elsewhere)
+        return Questions(confusionSection: collected, elsewhere: elsewhere)
     }
 }
 
@@ -307,8 +347,11 @@ extension Paper {
         if appraisalScore >= 0 { out += "appraisal_score: \(appraisalScore)\n" }
         if appraisalRank > 0 { out += "appraisal_rank: \(appraisalRank)\n" }
         if !tags.isEmpty { out += "tags: \(tags.joined(separator: ", "))\n" }
+        if !project.isEmpty { out += "project: \(Self.escape(project))\n" }
         if !refs.isEmpty { out += "refs: \(refs.joined(separator: ", "))\n" }
         if !pdfPath.isEmpty { out += "pdf: \(pdfPath)\n" }
+        if !sourceURL.isEmpty { out += "url: \(sourceURL)\n" }
+        if let p = publishedOn { out += "published: \(Self.iso.string(from: p))\n" }
         if citations > 0 { out += "cited: \(citations)\n" }
         if starred { out += "starred: true\n" }
         if archaic { out += "archaic: true\n" }
@@ -350,8 +393,11 @@ extension Paper {
         self.appraisalScore = front["appraisal_score"].flatMap(Int.init) ?? -1
         self.appraisalRank = front["appraisal_rank"].flatMap(Int.init) ?? -1
         self.tags = Self.list(front["tags"], separator: ",")
+        self.project = front["project"] ?? ""
         self.refs = Self.list(front["refs"], separator: ",")
         self.pdfPath = front["pdf"] ?? ""
+        self.sourceURL = front["url"] ?? ""
+        self.publishedOn = front["published"].flatMap { Self.iso.date(from: $0) }
         self.citations = front["cited"].flatMap(Int.init) ?? 0
         self.starred = (front["starred"] ?? "") == "true"
         self.archaic = (front["archaic"] ?? "") == "true"

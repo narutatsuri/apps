@@ -23,6 +23,7 @@ struct StickyView: View {
     @State private var colour: StickyColour = .yellow
     @State private var rendered = false
     @State private var floats = true
+    @State private var important = false
     @State private var showingPalette = false
     /// Nothing is written back until the note has actually been read in.
     ///
@@ -143,14 +144,30 @@ struct StickyView: View {
                     .foregroundStyle(ink.opacity(0.35))
             }
 
+            // Important means never delete: while the lock is closed the trash
+            // button is not merely disabled but absent, and ⌘⌫ is inert. The
+            // store refuses too — this is belt on top of braces.
             Button {
-                Store.shared.delete(id)
-                StickyWindow.close(id)
+                important.toggle()
+                persist()
             } label: {
-                Image(systemName: "trash").font(.system(size: 10))
+                Image(systemName: important ? "lock.fill" : "lock.open")
+                    .font(.system(size: 10))
             }
             .buttonStyle(.plain)
-            .help("Delete (⌘⌫) — moved to the notes folder's .trash, not gone")
+            .help(important ? "Important — cannot be deleted until unlocked (⌘L)"
+                            : "Mark important — never delete (⌘L)")
+
+            if !important {
+                Button {
+                    Store.shared.delete(id)
+                    StickyWindow.close(id)
+                } label: {
+                    Image(systemName: "trash").font(.system(size: 10))
+                }
+                .buttonStyle(.plain)
+                .help("Delete (⌘⌫) — moved to the notes folder's .trash, not gone")
+            }
         }
         .foregroundStyle(ink.opacity(0.55))
         .padding(.horizontal, 10)
@@ -163,8 +180,16 @@ struct StickyView: View {
             Group {
                 Button("") { rendered.toggle(); persist() }
                     .keyboardShortcut("r", modifiers: .command)
-                Button("") { Store.shared.delete(id); StickyWindow.close(id) }
-                    .keyboardShortcut(.delete, modifiers: .command)
+                Button("") {
+                    // Not even close the window: ⌘⌫ on an important note
+                    // should visibly do nothing, not half of what it used to.
+                    guard !important else { return }
+                    Store.shared.delete(id)
+                    StickyWindow.close(id)
+                }
+                .keyboardShortcut(.delete, modifiers: .command)
+                Button("") { important.toggle(); persist() }
+                    .keyboardShortcut("l", modifiers: .command)
                 ForEach(Array(StickyColour.allCases.enumerated()), id: \.offset) { i, c in
                     Button("") { colour = c; persist() }
                         .keyboardShortcut(KeyEquivalent(Character("\(i + 1)")), modifiers: .command)
@@ -186,6 +211,7 @@ struct StickyView: View {
         colour = s.colour
         rendered = s.rendered
         floats = s.floats
+        important = s.important
         // A new sticky exists to be typed into immediately.
         if s.text.isEmpty { editing = true }
     }
@@ -196,6 +222,7 @@ struct StickyView: View {
         s.colour = colour
         s.rendered = rendered
         s.floats = floats
+        s.important = important
         Store.shared.save(s)
     }
 }

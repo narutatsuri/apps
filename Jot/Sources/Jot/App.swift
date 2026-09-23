@@ -62,6 +62,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // JOT_WINDOWS=1 reports what actually reached the screen. "the window is
         // there but not visible" is a claim about NSWindow state, and reading it
         // from outside the process cannot tell a panel from a stray host view.
+        // JOT_MATHWIN=<x>,<y> — put the equation-measuring window somewhere it
+        // would be seen, if it could be. It is meant to live at -10000, and a
+        // screen-arrangement change once moved it onto a display where it sat
+        // as an uncloseable slab; being transparent is what makes that harmless
+        // now, and this is how that is photographed rather than asserted.
+        if let spec = ProcessInfo.processInfo.environment["JOT_MATHWIN"] {
+            let parts = spec.split(separator: ",").compactMap { Double($0) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                MathRenderer.parkMeasuringWindow(
+                    at: NSPoint(x: parts.first ?? 100, y: parts.count > 1 ? parts[1] : 100))
+                print("MATHWIN parked; invisible=\(MathRenderer.measuringWindowIsInvisible)")
+            }
+        }
+
         if ProcessInfo.processInfo.environment["JOT_WINDOWS"] == "1" {
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                 print("NSApp.windows — \(NSApp.windows.count)")
@@ -160,10 +174,23 @@ extension AppDelegate: NSMenuDelegate {
         new.target = self
         menu.addItem(new)
 
-        let toggle = NSMenuItem(title: StickyWindow.visibleCount > 0 ? "Hide All" : "Show All",
-                                action: #selector(menuToggle), keyEquivalent: "s")
-        toggle.target = self
-        menu.addItem(toggle)
+        // Two items, not one that changes its name. As a toggle it read "Hide
+        // All" the moment a *single* note was on screen, so with one sticky up
+        // and five put away there was no way to get the other five back from
+        // here — the one thing the menu is for. ⌃⌥S still toggles.
+        let showAll = NSMenuItem(title: "Show All Stickies", action: #selector(menuShowAll),
+                                 keyEquivalent: "s")
+        showAll.target = self
+        showAll.isEnabled = !Store.shared.ordered.isEmpty
+        menu.addItem(showAll)
+
+        let hideAll = NSMenuItem(title: "Hide All Stickies", action: #selector(menuHideAll),
+                                 keyEquivalent: "S")
+        hideAll.target = self
+        // Greyed rather than hidden: an item that comes and goes is one you have
+        // to hunt for, and its absence looks like the app forgetting how.
+        hideAll.isEnabled = StickyWindow.visibleCount > 0
+        menu.addItem(hideAll)
 
         menu.addItem(.separator())
 
@@ -208,7 +235,8 @@ extension AppDelegate: NSMenuDelegate {
         for line in ["⌃⌥Space  new · ⌃⌥S  show/hide",
                      "⌘B bold · ⌘I italic · ⌘E code",
                      "⌘⇧H highlight · ⌘⇧X strike · ⌘⇧M maths",
-                     "⌘R render · ⌘1–6 colour · ⌘⇧D dark · ⌘⌫ delete"] {
+                     "⌘R render · ⌘1–6 colour · ⌘⇧D dark · ⌘⌫ delete · ⌘L never-delete",
+                     "⌃⌫ delete word · retype #s + space to set a heading's level"] {
             let hint = NSMenuItem(title: line, action: nil, keyEquivalent: "")
             hint.isEnabled = false
             hint.attributedTitle = NSAttributedString(string: line, attributes: [
@@ -238,6 +266,8 @@ extension AppDelegate: NSMenuDelegate {
 
     @objc func menuNew() { newSticky() }
     @objc func menuToggle() { toggleAll() }
+    @objc func menuShowAll() { StickyWindow.showAll() }
+    @objc func menuHideAll() { StickyWindow.hideAll() }
     @objc func menuOpen(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
         StickyWindow.show(id)

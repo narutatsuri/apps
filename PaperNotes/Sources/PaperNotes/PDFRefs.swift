@@ -39,8 +39,13 @@ enum PDFRefs {
     /// the digit-truncation below would quietly turn it into "2021.", a different
     /// identity that matches nothing.
     static func normalise(_ id: String) -> String {
-        let trimmed = id.trimmingCharacters(in: .whitespaces)
+        var trimmed = id.trimmingCharacters(in: .whitespaces)
             .replacingOccurrences(of: "arXiv:", with: "", options: .caseInsensitive)
+        // A file dragged in as "<id>.pdf" used to keep the extension in its
+        // key: the id stopped looking arXiv-shaped, so no metadata, no arXiv
+        // link, and no citation edges ever matched it. 27 papers were keyed
+        // that way before this stripped it (see --repair-ids for the cleanup).
+        if trimmed.lowercased().hasSuffix(".pdf") { trimmed = String(trimmed.dropLast(4)) }
         guard Paper.isArxivID(trimmed) else { return trimmed }
         guard let dot = trimmed.firstIndex(of: ".") else { return trimmed }
         let tail = trimmed[trimmed.index(after: dot)...]

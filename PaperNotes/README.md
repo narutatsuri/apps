@@ -100,14 +100,62 @@ marked mangles TeX — `a_b` becomes emphasis and `\\` disappears. The round-tri
 covers exactly this, asserting a body containing `\epsilon_{\text{miss}}` and a
 display block survives byte-identically.
 
-Five prompts, chosen because a summary structurally cannot answer them for you:
-the claim **in your own words**, what evidence actually convinced you, what would
-have to be true for it to be wrong, **what you did not understand**, and free
-connections. The fourth is the one worth having — confusion is where the next paper
-comes from — and it is the field no summarizer will ever write.
+Two headings, which is the shape the notes settled into in practice:
+**Summary** and **Questions/Comments**. The original five-prompt template
+(claim / evidence / would-be-wrong-if / didn't-understand / connections) lives
+on in dozens of files and everything that parses notes still understands both —
+the grader reads Questions/Comments and the old confusion section alike, and
+the website export takes the Summary section (or the old claim section) and
+nothing else.
 
 Verdicts reuse the GOLD/SOLID/MIXED/THIN/GARBAGE scale from the existing summary
 rubric, so the two systems share a vocabulary instead of inventing a second scale.
+
+**Notes autosave.** What you type is written through to the file after a
+one-second pause, and flushed the moment you click a different paper or quit.
+It was not always so: the draft once lived only in memory with ⌘S as the sole
+path to disk, and switching papers mid-thought silently reset the note to the
+template — it cost a real note. Autosaved writes skip the git commit (a commit
+per keystroke burst would drown the history); leaving the note is what commits
+it, and ⌘S still commits on the spot. The flush writes only the fields the
+editor owns — body and verdict — so a queue or tag change landing in the
+background is never overwritten by a stale draft.
+
+**No in-app appraisal.** The automatic Claude pass on add, the appraisal row in
+the header, and Claude's stand-in grades in the sidebar were removed
+(2026-09-06, by request). The sidebar badge now shows only your verdict. The
+stored `appraisal_*` fields still round-trip — they order the "Most
+interesting" sort — and a deliberate batch pass is still available from the
+CLI via `--appraise` and `--rank`.
+
+## Scoped recommendations
+
+The Next window recommends for a chosen scope: the whole library, one
+project, or the trail from a single paper (right-click a paper → "What to
+read after this…", or use the picker in the window's header). A scoped run
+seeds similarity from the scope itself, mines its bibliographies (the
+three-papers-must-agree bar drops to one for a single paper, two for a
+project of four or more), builds the fresh-arXiv vocabulary from it, and
+skips the followed-authors feed — an author you follow has no relation to a
+scope. The judge weighs candidates against the same scope, so its verdicts
+mean "worth reading for this project", not "worth reading at all". Scoping
+to a single paper works on archived papers too — asking what follows a
+paper is a question about that paper.
+
+## Blog posts and web pages
+
+Any non-arXiv URL pasted into the add sheet becomes an entry: keyed by the
+URL's slug ("lesswrong-astra-and-fable-still-hack-on"), with the page's own
+title, authors and publication date, `venue` set to the host, and the URL in
+the frontmatter (`url:`) so the entry links back to its source. LessWrong,
+the Alignment Forum and the EA Forum are read through their GraphQL API —
+their bot wall serves plain fetchers a checkpoint page — and everything else
+through the page's structured metadata (JSON-LD, OpenGraph, meta tags, in
+that order), with nothing invented when a page declares nothing. `published:`
+in the frontmatter is what lets a post sort among the papers of its month.
+No PDF and no references, so no grading and few edges — the entry is a
+note-holder with a link. `--add-url <url>` does the same headlessly, and
+`--peek-url <url>` shows what a page declares without touching the library.
 
 ## Files
 
@@ -123,7 +171,37 @@ rubric, so the two systems share a vocabulary instead of inventing a second scal
 | `GraphLayout.swift` | Fruchterman–Reingold, pure and deterministic |
 | `GraphView.swift` | the Canvas graph window (⌘G) |
 | `Importer.swift` | `--import`, headless cataloguing |
+| `Projects.swift` | the project registry — `projects.txt`, names and colours |
 | `SelfTest.swift` | `--selftest` |
+
+## Projects
+
+Some papers are read *for* something. Those — and only those — carry a project
+tag: a coloured dot beside the title in the sidebar, and a coloured chip with
+the project's name under the title in the editor. Papers need no tag by
+default; the field exists only when set, so every note written before this
+round-trips byte-identically.
+
+The chip is also the control: click it (or the "project…" placeholder, or
+right-click a paper → Project) to assign, change, remove, or create a project.
+**Manage Projects…** (at the bottom of any project menu) lists every project
+with its paper count: click a swatch to change its colour after the fact, or
+the trash to delete it — the confirmation says how many papers will be
+untagged, and the papers themselves stay. Both write `projects.txt` and
+commit.
+
+Once any projects exist, a filter appears under the sidebar's sort picker —
+all projects, one project, or "No project" for the untagged. It narrows the
+browsing list and its counts; search and the reading queue stay unfiltered,
+since both are ways of finding a specific paper rather than browsing a shelf.
+New Project asks for a name and a colour, preselecting the least-used of the
+eight so projects stay tellable-apart without thought.
+
+Projects live in `projects.txt` at the repo root — one line each,
+`<colour> <name>`, versioned with the notes and editable by hand. The paper's
+frontmatter carries only the project *name* (`project: …`); the file supplies
+its colour. A tag whose project was deleted from the file shows grey rather
+than vanishing — the tag belongs to the paper.
 
 ## Git
 
@@ -196,6 +274,45 @@ library telling you what you have actually read.
 Catalogues every PDF whose filename carries an arXiv id — same pipeline as Finder,
 minus opening each one for reading. Imported papers hold no note, so they appear as
 "catalogued only" until you read them.
+
+## Window sizing
+
+The window shrinks to 480pt wide — half a screen is a legitimate place to keep
+it. Below the width the whole verdict row needs, the row clips at its right
+edge rather than holding the window hostage; the editor/preview divider yields
+before it can leave the window. `PN_WINTEST=1` launches, shrinks the window
+programmatically, and verifies both the minimum and that the editor and
+preview panes survive it.
+
+## The website graph
+
+The Misc. page of narutatsuri.github.io fetches `reading-graph.json` straight
+from this notes repo on GitHub (raw.githubusercontent serves public repos
+with open CORS), so the site's graph updates when the notes are pushed —
+nothing is committed to the website repo. The app regenerates the file just
+before any push that carries changes and commits it only when its bytes
+moved; the export is deterministic, so quiet cycles cost nothing. GitHub's
+CDN caches for ~5 minutes, which is how stale the site can briefly be.
+
+`--export-graph <path>` writes the same export anywhere by hand: same nodes
+(archived out), same edges, same deterministic layout, viridis-by-year and
+sqrt-citations sizing as the graph window. A `.js` path wraps the JSON in
+`window.READING_GRAPH = …`; a `.json` path (what the repo carries) is plain
+JSON. Per node
+the export carries geometry, title, link, and `Paper.webSummary`: the Summary
+section (current template) or claim section (old template) where written, the
+whole prose for a free-form note (the old site's imported summaries), and
+nothing for a templated note without one — questions, comments, confusions
+and verdicts stay off the web. Nothing to regenerate by hand — the push hook
+keeps `reading-graph.json` current.
+
+The renderer is `assets/reading-graph.js` in the website repo — a
+dependency-free canvas port of the graph window itself: GraphSim's physics
+constants line for line, the dark surface, viridis nodes with the app's radii,
+labels claimed by citation order, pan/scroll-zoom/node-dragging, double-click
+to reset. Hollow circles are papers whose summary is unwritten; hovering shows
+the summary. The export's positions seed the sim so the page opens settled
+rather than scrambling.
 
 ## Seeing the layout without screen recording
 

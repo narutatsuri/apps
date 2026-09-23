@@ -80,6 +80,72 @@ enum Diagnose {
         }
     }
 
+    /// PN_WINTEST=1 — how narrow does the notes window actually go?
+    ///
+    /// The floor is whatever SwiftUI derives from the live content, so the only
+    /// honest number comes from the live window: read its minimum, shrink it,
+    /// and read what survived. A paper is selected first — the empty-state
+    /// placeholder is narrower than the editor, so measuring without one would
+    /// report a floor no real session has.
+    static func scheduleWidthCheck() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            MainActor.assumeIsolated {
+                let model = AppModel.shared
+                if let first = model.papers.first { model.select(first.arxivID) }
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+            guard let window = AppDelegate.mainWindow() else {
+                print("FAIL  width check — no notes window"); exit(1)
+            }
+            print("contentMinSize before shrinking: "
+                  + "\(Int(window.contentMinSize.width))×\(Int(window.contentMinSize.height))")
+            // Programmatic setFrame ignores minSize; what it measures is whether
+            // SwiftUI re-inflates the window to a bigger content minimum, which
+            // is how a floor actually shows itself (the Frontier lesson).
+            var f = window.frame
+            f.size.width = 500
+            window.setFrame(f, display: true)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                let width = window.frame.width
+                let minW = window.contentMinSize.width
+                print("asked for 500pt: window is \(Int(width))pt wide, "
+                      + "contentMinSize \(Int(minW))pt")
+                // 700 sits between the old floor (980) and where the window
+                // should now reach, so the check discriminates.
+                let shrank = width <= 700 && minW <= 700
+
+                // Small is only a win if the layout adapted. The editor's text
+                // view and the preview's web view must both survive the shrink
+                // inside the window — a pane pushed out or squeezed to nothing
+                // is the failure this width used to be protecting against.
+                var editors: [CGFloat] = []
+                var previews: [CGFloat] = []
+                func walk(_ v: NSView, _ depth: Int) {
+                    guard depth < 30 else { return }
+                    for sub in v.subviews {
+                        let name = String(describing: type(of: sub))
+                        let w = sub.frame.width
+                        if name.contains("TextView"), w > 40 { editors.append(w) }
+                        if name.contains("WKWebView") { previews.append(w) }
+                        walk(sub, depth + 1)
+                    }
+                }
+                if let content = window.contentView { walk(content, 0) }
+                let editorW = editors.max() ?? 0
+                let previewW = previews.max() ?? 0
+                print("editor text view \(Int(editorW))pt, preview web view \(Int(previewW))pt")
+                let adapted = editorW > 100 && editorW < width
+                    && previewW > 40 && previewW < width
+                let ok = shrank && adapted
+                print(ok ? "PASS  the window shrinks and the panes adapt"
+                    : shrank ? "FAIL  window shrank but a pane did not survive it"
+                             : "FAIL  still floored well above the content's needs")
+                exit(ok ? 0 : 1)
+            }
+        }
+    }
+
     static func scheduleDump() {
         // Select a paper first, or the detail pane shows the placeholder and the
         // editor never exists to be measured.

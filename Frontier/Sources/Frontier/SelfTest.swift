@@ -60,6 +60,53 @@ enum SelfTest {
               back.sources[1].reachable == false,
               "a citation that 404s is not a citation")
         check("round-trip: body", back.body.contains("Blocks, not one buffer"))
+
+        // --- the test at the bottom of an entry
+        //
+        // One format, not two: what the model is asked to produce is what goes
+        // in the file, so a bad question can be fixed in any editor and there is
+        // no wire format to keep in step with a storage format.
+        let quiz = """
+            ### Which binds occupancy first at 96 registers per thread?
+            - [ ] Shared memory per block
+            - [x] Registers per SM
+            - [ ] The 2048-thread cap
+
+            ### Derive the occupancy, showing the arithmetic.
+            > 65536/96 = 682 threads, so 21 warps of 32.
+            > 21/64 = 33%.
+            """
+        let parsed = Concept.questions(fromMarkdown: quiz)
+        check("a test parses into questions", parsed.count == 2, "got \(parsed.count)")
+        check("the ticked box is the answer",
+              parsed.first?.correct == 1 && parsed.first?.choices.count == 3)
+        check("a question with no choices is a written one",
+              parsed.last?.isWritten == true && parsed.first?.isWritten == false)
+        check("a multi-line mark scheme is kept whole",
+              parsed.last?.expected.contains("682 threads") == true
+              && parsed.last?.expected.contains("33%") == true,
+              "it is shown after answering, so it has to survive intact")
+        check("a multiple-choice question with nothing ticked is dropped",
+              Concept.questions(fromMarkdown: "### q\n- [ ] a\n- [ ] b").isEmpty,
+              "it cannot be marked, and marking every attempt wrong is worse "
+            + "than not asking it")
+        var quizzed = make("q")
+        quizzed.questions = parsed
+        check("round-trip: a test survives the file",
+              Concept(markdown: quizzed.markdown)?.questions == parsed,
+              "got \(Concept(markdown: quizzed.markdown)?.questions.count ?? -1) questions back")
+        var full = make("q")
+        full.body = "the entry"
+        full.walkthrough = "the long version"
+        full.questions = parsed
+        let backFull = Concept(markdown: full.markdown)
+        check("round-trip: entry, walkthrough and test do not bleed into each other",
+              backFull?.body == "the entry" && backFull?.walkthrough == "the long version"
+              && backFull?.questions.count == 2,
+              "three sections in one file, split off the back so a marker that "
+            + "was never written does not shift the others")
+        check("a concept with no test is unchanged by all this",
+              Concept(markdown: make("plain").markdown)?.questions.isEmpty == true)
         check("a file with no id is refused", Concept(markdown: "---\ntitle: x\n---\n\nbody") == nil)
         check("slugs are stable and typeable",
               Concept.slug("Paged Attention (vLLM)") == "paged-attention-vllm")
@@ -136,6 +183,196 @@ enum SelfTest {
         check("a session is as long as asked for", day.count == 3)
         check("a small graph still fills the session",
               Frontier.session([make("only")], size: 3).count == 1)
+
+        // --- spaced revisit
+        //
+        // "Still learning" used to be a flat +12 for ever, so one press pinned a
+        // concept to the top of every session until it was marked known. These
+        // check the schedule that replaced it. All of them are written against a
+        // fixed `today` rather than Date(), so they do not quietly start passing
+        // or failing depending on when they run.
+        let today = Date(timeIntervalSince1970: 1_800_000_000)
+        func learning(_ id: String, dueIn days: Double, revisits: Int = 1,
+                      area: Concept.Area = .systems) -> Concept {
+            var c = make(id, status: .learning, area: area)
+            c.dueOn = today.addingTimeInterval(days * 86_400)
+            c.revisits = revisits
+            return c
+        }
+
+        // The interval now follows the score, not a press count. A button
+        // press is not evidence about what you know; a test result is.
+        check("a good score multiplies the gap",
+              Frontier.nextInterval(afterScore: 0.95, previous: 4) == 10,
+              "got \(Frontier.nextInterval(afterScore: 0.95, previous: 4)) — the "
+            + "gap is where the value of spacing is")
+        check("a middling score holds it",
+              Frontier.nextInterval(afterScore: 0.6, previous: 7) == 7,
+              "shaky means ask again after the same gap, not a longer one")
+        check("a bad score collapses it, whatever the history",
+              Frontier.nextInterval(afterScore: 0.3, previous: 40) == 1,
+              "an expanding ladder that ignores the answer is the old bug")
+        check("a first pass starts from one day",
+              Frontier.nextInterval(afterScore: 0.95, previous: 0) == 3)
+        check("the gap stops widening rather than running away",
+              Frontier.nextInterval(afterScore: 1.0, previous: 50)
+                  == Frontier.maximumIntervalDays,
+              "past two months a concept you have not retained wants a different "
+            + "entry, not a longer wait")
+        check("a top score does not mark a concept known",
+              { var c = make("x", status: .learning)
+                c.intervalDays = 10
+                return Frontier.nextDue(for: c, score: 1.0, now: today).interval == 26 }(),
+              "one good morning is not the same as being finished")
+
+        // The bug itself: a carried-over concept, not yet due, outranking work
+        // that is actually ready. `unread` unlocks nothing, so before the change
+        // the learning concept's +12 beat it every morning for ever.
+        let notDue = [learning("carried", dueIn: 5), make("fresh")]
+        let ordered = Frontier.ready(notDue, now: today)
+        check("a concept waiting for its next revisit sorts below ready work",
+              ordered.map(\.id) == ["fresh", "carried"],
+              "one press of Still learning used to pin it to the top for ever")
+        check("and it stays in the list rather than vanishing",
+              ordered.count == 2,
+              "the sidebar is also how you find something again")
+        check("a concept that has come due is back at full weight",
+              Frontier.ready([learning("carried", dueIn: -1), make("fresh")],
+                             now: today).map(\.id) == ["carried", "fresh"])
+        check("a concept marked before scheduling existed counts as due",
+              Frontier.ready([make("legacy", status: .learning), make("fresh")],
+                             now: today).map(\.id) == ["legacy", "fresh"],
+              "no due date must not mean never")
+
+        // The cap. Three concepts all genuinely due, in three different areas so
+        // the area spread cannot be what limits them.
+        let backlog = [learning("l1", dueIn: -3, area: .hardware),
+                       learning("l2", dueIn: -2, area: .theory),
+                       learning("l3", dueIn: -1, area: .safety),
+                       make("n1", area: .training), make("n2", area: .tooling)]
+        let backlogDay = Frontier.session(backlog, size: 3, now: today)
+        check("a session carries over at most one half-learned concept",
+              backlogDay.filter { $0.status == .learning }.count == 1,
+              "got \(backlogDay.map(\.id)) — three things you already failed to "
+            + "learn is the same session again")
+        check("and the freed slots go to new work",
+              backlogDay.count == 3 && backlogDay.filter { $0.status == .unread }.count == 2)
+        check("a concept not yet due is not in the session at all",
+              !Frontier.session([learning("carried", dueIn: 5), make("fresh")],
+                                size: 3, now: today).contains { $0.id == "carried" })
+
+        check("round-trip: a revisit schedule survives the file",
+              Concept(markdown: learning("x", dueIn: 3, revisits: 2).markdown)
+                  .map { $0.revisits == 2 && $0.dueOn != nil } == true,
+              "a schedule that does not persist resets every launch")
+        check("round-trip: an unscheduled concept has no due date",
+              Concept(markdown: make("x").markdown)
+                  .map { $0.dueOn == nil && $0.revisits == 0 } == true)
+        check("the schedule is legible before it is written to the file",
+              learning("x", dueIn: 3).revisitDescription(at: today) == "back in 3 days"
+              && learning("x", dueIn: -1).revisitDescription(at: today) == "due now",
+              "a scheduler you cannot see is a concept the app lost")
+
+        // --- prerequisites that point a few words wide
+        //
+        // Nearly every "missing prerequisite" in the real graph was an edge
+        // naming a concept that exists under a slightly different id, because
+        // the model writes `requires:` from the title rather than the id. Since
+        // `ready` treats an unknown prerequisite as non-blocking, each of those
+        // was a silently deleted edge, not a visible broken one.
+        let realIDs = ["gpu-execution-model", "arithmetic-intensity-and-roofline",
+                       "cache-coherence-snooping-and-false-sharing",
+                       "cpu-architecture-and-memory-caches", "mixed-precision-training",
+                       "post-training-quantization", "quantization-aware-training-and-ste",
+                       "kv-cache"]
+        check("an id with extra words finds the concept it meant",
+              Frontier.resolve("gpu-execution-model-sms-warps-occupancy",
+                               among: realIDs) == "gpu-execution-model")
+        check("a joining word is not a difference",
+              Frontier.resolve("arithmetic-intensity-roofline",
+                               among: realIDs) == "arithmetic-intensity-and-roofline",
+              "\"…-and-roofline\" and \"…-roofline\" are the same three words")
+        check("a shorter id finds the concept that elaborates it",
+              Frontier.resolve("cache-coherence", among: realIDs)
+                  == "cache-coherence-snooping-and-false-sharing")
+        check("mostly-overlapping names match",
+              Frontier.resolve("cpu-architecture-caches-simd-pipelines",
+                               among: realIDs) == "cpu-architecture-and-memory-caches")
+        check("two plausible concepts means no link",
+              Frontier.resolve("quantization-methods", among: realIDs) == nil,
+              "post-training and quantization-aware both fit; a wrong edge "
+            + "teaches the wrong order, and a missing one is at least visible")
+        check("an unrelated id is left alone",
+              Frontier.resolve("speculative-decoding", among: realIDs) == nil)
+        check("an id that exists is returned unchanged",
+              Frontier.resolve("kv-cache", among: realIDs) == "kv-cache")
+
+        var broken = make("attention", requires: ["gpu-execution-model-sms-warps-occupancy",
+                                                  "genuinely-absent-thing"])
+        let fixedUp = Frontier.relinked([broken, make("gpu-execution-model")])
+        check("relinking repairs the edge and reports it",
+              fixedUp.concepts.first { $0.id == "attention" }?.requires
+                  == ["gpu-execution-model", "genuinely-absent-thing"]
+              && fixedUp.repairs.count == 1)
+        check("relinking leaves a genuinely undefined prerequisite alone",
+              Frontier.missing(fixedUp.concepts) == ["genuinely-absent-thing"],
+              "a concept the graph really lacks should stay visible in --status")
+        broken = make("x", requires: ["gpu-execution-model", "gpu-execution-model-sms-warps"])
+        check("a repair that collides with an existing edge does not duplicate it",
+              Frontier.relinked([broken, make("gpu-execution-model")])
+                  .concepts.first { $0.id == "x" }?.requires == ["gpu-execution-model"])
+        check("a concept is never made to require itself",
+              Frontier.relinked([make("gpu-execution-model",
+                                      requires: ["gpu-execution-model-sms-warps"])])
+                  .concepts[0].requires == ["gpu-execution-model-sms-warps"])
+
+        // --- marking the written answers
+        //
+        // The grader is a model, so its reply is parsed rather than trusted. If
+        // this ever stops matching, every written answer comes back unmarked and
+        // the only symptom is scores quietly landing at half marks.
+        let marks = Tutor.parseMarks("""
+            Here are the marks.
+            SCORE 100 | Covered the scheme, including the 21/64 step.
+            SCORE 50 | States 33% without the register arithmetic.
+            SCORE 0 | Blank.
+            """)
+        check("the grader's marks are read back",
+              marks.map(\.score) == [1.0, 0.5, 0.0], "got \(marks.map(\.score))")
+        check("and the reason with them",
+              marks.first?.comment.contains("21/64") == true)
+        check("a reply with no marks in it yields none",
+              Tutor.parseMarks("I could not mark these.").isEmpty,
+              "half marks for an unmarked answer is a decision made elsewhere, "
+            + "deliberately, rather than a zero smuggled in here")
+        check("a mark out of range is clamped",
+              Tutor.parseMarks("SCORE 250 | x").first?.score == 1.0)
+
+        // --- reading a syllabus page
+        //
+        // The line filter is what decides how much of a course reaches the
+        // model. It is applied to two very differently-shaped inputs: HTML with
+        // its tags replaced by newlines, and a browser's `innerText`, where a
+        // schedule table arrives as tab-separated rows.
+        let row = "3\tSep 12\tVectorisation, SIMD and the memory wall\t"
+                + "Slides\tReading: Chapter 4"
+        let split = Courses.topicLines(row)
+        check("a tab-separated schedule row becomes separate topics",
+              split.contains("Vectorisation, SIMD and the memory wall"),
+              "got \(split) — innerText renders a table row as one line, and a "
+            + "whole row is too long to survive the length filter")
+        check("a navigation label is not a topic",
+              Courses.topicLines("Home\nLogistics\nSchedule").isEmpty,
+              "got \(Courses.topicLines("Home\nLogistics\nSchedule"))")
+        check("a paragraph is not a topic",
+              Courses.topicLines(String(repeating: "long prose ", count: 40)).isEmpty)
+        check("the same lecture title listed twice is one topic",
+              Courses.topicLines("Attention and transformers\nAttention and transformers")
+                  .count == 1)
+        check("every course is fetched over https",
+              Courses.all.allSatisfy { $0.url.hasPrefix("https://") },
+              "a cleartext URL is refused by ATS and the course silently "
+            + "contributes nothing — which is exactly what CS336 was doing")
 
         // --- importing a resource: the text machinery, which must not eat chapters
         let bookText = """

@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// The text area of a note.
 ///
@@ -33,10 +34,92 @@ final class EditorHandle {
 final class JotTextView: NSTextView {
     var ink: NSColor = .black
     var paper: NSColor = .white
+    /// Given a dropped image file, returns the markdown to insert for it —
+    /// after copying it wherever this app keeps images. Nil means image drops
+    /// are not this app's business and fall through to the default.
+    var imageDropHandler: ((URL) -> String?)?
 
     /// Everything here is plain text. A paste that carried fonts and colours in
     /// from a web page would be the exact thing this app exists to avoid.
     override func paste(_ sender: Any?) { pasteAsPlainText(sender) }
+
+    /// The image files on a drag, if any.
+    private func imageFiles(on sender: NSDraggingInfo) -> [URL] {
+        guard imageDropHandler != nil else { return [] }
+        let options: [NSPasteboard.ReadingOptionKey: Any] = [
+            .urlReadingFileURLsOnly: true,
+            .urlReadingContentsConformToTypes: [UTType.image.identifier],
+        ]
+        return sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: options)
+            as? [URL] ?? []
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        imageFiles(on: sender).isEmpty ? super.draggingEntered(sender) : .copy
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        imageFiles(on: sender).isEmpty ? super.draggingUpdated(sender) : .copy
+    }
+
+    /// An image dropped on the text lands as `![name](path)` at the drop
+    /// point, which the highlighter then collapses into the picture — the
+    /// same path a typed link takes, so the binding, undo and the file on
+    /// disk all see one ordinary text insertion.
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let files = imageFiles(on: sender)
+        guard !files.isEmpty, let handler = imageDropHandler else {
+            return super.performDragOperation(sender)
+        }
+        let links = files.compactMap(handler)
+        guard !links.isEmpty else { return false }
+        let point = convert(sender.draggingLocation, from: nil)
+        let index = characterIndexForInsertion(at: point)
+        setSelectedRange(NSRange(location: index, length: 0))
+        insertText(links.joined(separator: "\n"), replacementRange: selectedRange())
+        return true
+    }
+
+    /// ⌫ at the very start of a heading line removes the title.
+    ///
+    /// The marker is invisible — the hashes collapsed when the heading was
+    /// made — so this treats it as sitting just before the first character:
+    /// one ⌫ deletes the title-ness, the next merges lines the way ⌫ always
+    /// does. Without this there was no way back to plain text at all; the
+    /// retyped-marker gesture only reaches levels one to six.
+    override func deleteBackward(_ sender: Any?) {
+        let caret = selectedRange()
+        if caret.length == 0, let storage = textStorage {
+            let ns = storage.string as NSString
+            let para = ns.paragraphRange(for: NSRange(
+                location: min(caret.location, ns.length), length: 0))
+            if caret.location == para.location, para.length > 0,
+               para.location < storage.length,
+               (storage.attribute(Attributed.headingKey, at: para.location,
+                                  effectiveRange: nil) as? Int ?? 0) > 0,
+               let coordinator = delegate as? MarkdownEditor.Coordinator,
+               coordinator.removeHeading(lineAt: para, in: self) {
+                return
+            }
+        }
+        super.deleteBackward(sender)
+    }
+
+    /// ⌃⌫ deletes the previous word.
+    ///
+    /// The system binding sent it somewhere much bigger — it read as "delete
+    /// everything before the cursor" in use — and word-wise is what was wanted.
+    /// ⌥⌫ already does this natively; now both chords agree.
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 51,                                   // delete
+           event.modifierFlags.contains(.control),
+           !event.modifierFlags.contains(.command),
+           !event.modifierFlags.contains(.option) {
+            deleteWordBackward(self)
+            return
+        }
+        super.keyDown(with: event)
+    }
 }
 
 struct MarkdownEditor: NSViewRepresentable {
@@ -46,6 +129,8 @@ struct MarkdownEditor: NSViewRepresentable {
     /// Black on light paper, always. Not `.labelColor`: a note is a physical
     /// object here, and its ink does not change when the OS switches to dark.
     var ink: NSColor = .black
+    /// See `JotTextView.imageDropHandler`.
+    var onImageDrop: ((URL) -> String?)? = nil
 
     func makeNSView(context: Context) -> NSScrollView {
         // Built by hand rather than with NSTextView.scrollableTextView() so the
@@ -94,6 +179,7 @@ struct MarkdownEditor: NSViewRepresentable {
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
 
+        view.imageDropHandler = onImageDrop
         context.coordinator.view = view
         handle?.view = view
         storage.setAttributedString(Attributed.make(from: text, ink: ink, paper: paper))
@@ -195,7 +281,20 @@ struct MarkdownEditor: NSViewRepresentable {
         /// carries on only when the caret is genuinely inside a run — between
         /// two characters that agree — which is what closing `**` meant.
         func textViewDidChangeSelection(_ notification: Notification) {
-            guard let view, let storage = view.textStorage, !isCollapsing else { return }
+            guard !isCollapsing else { return }
+            refreshTypingAttributes()
+        }
+
+        /// What the next keystroke will be styled as, from where the caret sits.
+        ///
+        /// Called from the selection delegate, and *explicitly* at the end of a
+        /// collapse: the collapse moves the caret while its re-entry guard is
+        /// up, which silently swallowed the selection callback — so the first
+        /// keystroke after `# T` became a heading was inserted with the stale
+        /// plain attributes, and the second letter of every title came out
+        /// unformatted.
+        func refreshTypingAttributes() {
+            guard let view, let storage = view.textStorage else { return }
             let caret = view.selectedRange()
             guard caret.length == 0 else { return }
 
@@ -237,9 +336,26 @@ struct MarkdownEditor: NSViewRepresentable {
             let lines = ns.paragraphRange(for: clamped)
             guard lines.length > 0 else { return }
 
-            let source = Attributed.markdown(from: storage.attributedSubstring(from: lines))
+            var source = Attributed.markdown(from: storage.attributedSubstring(from: lines))
+            // A marker typed at the front of a heading that has already
+            // collapsed *sets* the level — it does not stack. Once "## Title"
+            // is styled there are no hashes left on screen, so retyping the
+            // marker is the only way to reformat, and what the user types is
+            // the level they mean: "# " makes it a title whatever it was,
+            // "### " a sub-sub-heading. In serialised form that gesture is the
+            // old marker followed by the typed one — "## # Title" — and the
+            // old one gives way. The typed run must end in a space, the same
+            // trigger every marker uses, so a heading whose text merely starts
+            // with "#1" is left alone.
+            source = Self.relevel.stringByReplacingMatches(
+                in: source, range: NSRange(source.startIndex..., in: source),
+                withTemplate: "$1")
             let rebuilt = Attributed.make(from: source, ink: parent.ink, paper: parent.paper)
-            guard rebuilt.string != ns.substring(with: lines) else { return }
+            // Styling, not just characters. A letter typed with stale
+            // attributes round-trips to the same *string* — "Ti" is "Ti"
+            // whether or not the i knows it is in a heading — and comparing
+            // strings alone meant that damage was never repaired.
+            guard !stylingMatches(rebuilt, storage.attributedSubstring(from: lines)) else { return }
 
             let caret = view.selectedRange().location
             let delta = (rebuilt.string as NSString).length - lines.length
@@ -265,6 +381,70 @@ struct MarkdownEditor: NSViewRepresentable {
             let moved = caret >= NSMaxRange(lines) ? caret + delta
                       : min(max(caret + delta, lines.location), lines.location + rebuilt.length)
             view.setSelectedRange(NSRange(location: max(0, min(moved, storage.length)), length: 0))
+            // The caret move above happened with the re-entry guard up, so the
+            // selection delegate did not run. Refresh by hand or the next
+            // keystroke types with whatever the attributes were before the
+            // collapse — the second-letter bug.
+            refreshTypingAttributes()
+        }
+
+        /// The line's markdown without its heading marker, replacing the line.
+        /// What ⌫ at the start of a heading means: back to plain text.
+        func removeHeading(lineAt lines: NSRange, in view: NSTextView) -> Bool {
+            guard let storage = view.textStorage else { return false }
+            let source = Attributed.markdown(from: storage.attributedSubstring(from: lines))
+            guard let range = source.range(of: "^#{1,6}[ \\t]+",
+                                           options: .regularExpression) else { return false }
+            let rebuilt = Attributed.make(from: String(source[range.upperBound...]),
+                                          ink: parent.ink, paper: parent.paper)
+            let caret = view.selectedRange().location
+            isCollapsing = true
+            defer { isCollapsing = false }
+            view.breakUndoCoalescing()
+            view.undoManager?.beginUndoGrouping()
+            guard view.shouldChangeText(in: lines, replacementString: rebuilt.string) else {
+                view.undoManager?.endUndoGrouping()
+                return false
+            }
+            storage.replaceCharacters(in: lines, with: rebuilt)
+            view.didChangeText()
+            view.undoManager?.endUndoGrouping()
+            view.breakUndoCoalescing()
+            view.setSelectedRange(NSRange(location: min(caret, storage.length), length: 0))
+            refreshTypingAttributes()
+            // The keystroke never reaches the normal change path, so the
+            // binding is updated by hand or the file keeps the heading.
+            parent.text = Attributed.markdown(from: storage)
+            return true
+        }
+
+        /// "## # Title" → "# Title": the typed marker replaces the stored one.
+        nonisolated(unsafe) private static let relevel = try! NSRegularExpression(
+            pattern: "^#{1,6}[ \\t]+(#{1,6}[ \\t])", options: [.anchorsMatchLines])
+
+        /// Same words, same meaning? The semantic keys only — the attachment
+        /// objects inside equations differ by identity on every rebuild, and
+        /// visual attributes follow from these.
+        private func stylingMatches(_ a: NSAttributedString, _ b: NSAttributedString) -> Bool {
+            guard a.string == b.string, a.length == b.length else { return false }
+            for i in 0..<a.length {
+                if (a.attribute(Attributed.styleKey, at: i, effectiveRange: nil) as? Int ?? 0)
+                    != (b.attribute(Attributed.styleKey, at: i, effectiveRange: nil) as? Int ?? 0)
+                    { return false }
+                if (a.attribute(Attributed.headingKey, at: i, effectiveRange: nil) as? Int ?? 0)
+                    != (b.attribute(Attributed.headingKey, at: i, effectiveRange: nil) as? Int ?? 0)
+                    { return false }
+                if (a.attribute(Attributed.linkKey, at: i, effectiveRange: nil) as? String)
+                    != (b.attribute(Attributed.linkKey, at: i, effectiveRange: nil) as? String)
+                    { return false }
+                if (a.attribute(Attributed.mathKey, at: i, effectiveRange: nil) as? MathSpec)
+                    != (b.attribute(Attributed.mathKey, at: i, effectiveRange: nil) as? MathSpec)
+                    { return false }
+                if (a.attribute(Attributed.imageKey, at: i, effectiveRange: nil) as? ImageSpec)
+                    != (b.attribute(Attributed.imageKey, at: i, effectiveRange: nil) as? ImageSpec)
+                    { return false }
+            }
+            return true
         }
 
         /// Puts newly typeset equations into the attachments already in place,
@@ -275,13 +455,20 @@ struct MarkdownEditor: NSViewRepresentable {
             let full = NSRange(location: 0, length: storage.length)
             var touched = false
             storage.enumerateAttribute(Attributed.mathKey, in: full) { value, range, _ in
+                // The style has to come along: a highlighted equation is drawn
+                // against the highlight, because the image would otherwise paint
+                // over it (see Attributed.mathPaper).
+                let style = InlineStyle(rawValue: storage.attribute(
+                    Attributed.styleKey, at: range.location, effectiveRange: nil) as? Int ?? 0)
                 guard let spec = value as? MathSpec,
                       let attachment = storage.attribute(.attachment, at: range.location,
                                                          effectiveRange: nil) as? MathAttachment,
                       !attachment.isTypeset,
                       let rendered = MathRenderer.shared.rendering(
                         tex: spec.tex, display: spec.display, size: Attributed.baseSize,
-                        ink: parent.ink, paper: parent.paper) else { return }
+                        ink: parent.ink,
+                        paper: Attributed.mathPaper(style: style, paper: parent.paper))
+                else { return }
                 Attributed.apply(rendered, to: attachment, spec: spec, ink: parent.ink)
                 touched = true
             }
@@ -355,8 +542,28 @@ extension NSTextView {
         guard shouldChangeText(in: selection, replacementString: nil) else { return }
         storage.beginEditing()
         for i in selection.location..<NSMaxRange(selection) {
-            // Attachments are equations; emphasising one means nothing.
-            guard storage.attribute(Attributed.mathKey, at: i, effectiveRange: nil) == nil else { continue }
+            let one = NSRange(location: i, length: 1)
+
+            // An equation takes the style too. It used to be skipped — "you
+            // cannot embolden a picture" — but the style is also what says where
+            // the markers go, so a highlight dragged across an equation left a
+            // gap and was written back out as two separate highlights. The
+            // attributes are merged rather than set: an attachment's own keys
+            // are the equation, and replacing them wholesale would erase it.
+            if let spec = storage.attribute(Attributed.mathKey, at: i,
+                                            effectiveRange: nil) as? MathSpec {
+                var next = current(at: i)
+                if everywhere { next.remove(style) } else { next.insert(style) }
+                // Rebuilt rather than re-attributed, because a highlight has to
+                // be inside the rendered picture, not behind it. One character
+                // replaced by one character, so the loop's indices still hold.
+                let paper = (self as? JotTextView)?.paper ?? .white
+                storage.replaceCharacters(
+                    in: one,
+                    with: Attributed.mathRun(spec, style: next, ink: ink, paper: paper))
+                continue
+            }
+
             var next = current(at: i)
             if everywhere { next.remove(style) } else { next.insert(style) }
             let heading = storage.attribute(Attributed.headingKey, at: i, effectiveRange: nil) as? Int ?? 0

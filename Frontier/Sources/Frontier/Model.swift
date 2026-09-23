@@ -17,12 +17,22 @@ final class Model: ObservableObject {
     /// class, so recomputing on load() is both cheaper and still correct.
     @Published private(set) var session: [Concept] = []
     @Published private(set) var ready: [Concept] = []
+    /// Marked "still learning" and waiting for their next turn, soonest first.
+    /// Shown in their own section: a concept that drops out of the running with
+    /// nowhere to see it again reads as one the app lost.
+    @Published private(set) var deferred: [Concept] = []
 
     func load() {
         Store.shared.bootstrap()
         concepts = Store.shared.concepts
-        session = Frontier.session(concepts)
-        ready = Frontier.ready(concepts)
+        let now = Date()
+        session = Frontier.session(concepts, now: now)
+        // `ready` means actionable this morning, which is what the sidebar
+        // section says it means; the scheduled ones are listed separately.
+        let frontier = Frontier.ready(concepts, now: now)
+        deferred = frontier.filter { $0.isDeferred(at: now) }
+            .sorted { ($0.dueOn ?? .distantFuture) < ($1.dueOn ?? .distantFuture) }
+        ready = frontier.filter { !$0.isDeferred(at: now) }
         if selected == nil { selected = session.first?.id }
     }
 
@@ -32,11 +42,40 @@ final class Model: ObservableObject {
         var c = concept
         c.status = status
         c.learnedOn = status == .known ? Date() : nil
+        switch status {
+        case .learning:
+            // Reached only when something other than a test says "not yet" —
+            // the CLI, or a concept with no test written. A middling score, so
+            // the gap holds rather than growing on no evidence.
+            record(score: 0.6, for: c)
+            return
+        case .known, .unread:
+            // Learned, or reset: nothing is owed. The history stays as a record
+            // of how many passes it took and how the last one went.
+            c.dueOn = nil
+        }
         Store.shared.save(c)
         load()
         // Learning something changes what is ready, so the next pick is
         // recomputed rather than left stale.
         if status == .known, selected == concept.id { selected = session.first?.id }
+    }
+
+    /// Files a test result, and schedules the concept from it.
+    ///
+    /// This is what the "Still learning" button used to do badly. Pressing a
+    /// button is not evidence about what you know, so the gap grew whether or
+    /// not you were learning; a score is evidence, so the gap now follows it.
+    func record(score: Double, for concept: Concept) {
+        var c = concept
+        c.status = .learning
+        c.lastScore = score
+        let next = Frontier.nextDue(for: c, score: score)
+        c.dueOn = next.due
+        c.intervalDays = next.interval
+        c.revisits += 1
+        Store.shared.save(c)
+        load()
     }
 
     /// Writes the entry for a concept. Off the main thread — the CLI takes
@@ -56,6 +95,7 @@ final class Model: ObservableObject {
                 guard let written else { self.note = "No answer from the model."; return }
                 var c = concept
                 c.body = written.body
+                c.questions = written.questions
                 c.sources = written.sources
                 Store.shared.save(c)
                 self.load()
@@ -68,6 +108,31 @@ final class Model: ObservableObject {
             await MainActor.run {
                 guard var c = Store.shared.concept(concept.id), !checked.isEmpty else { return }
                 c.sources = checked
+                Store.shared.save(c)
+                self.load()
+            }
+        }
+    }
+
+    /// Writes a test for an entry that has none.
+    ///
+    /// New entries come with one — the same call that writes the entry writes
+    /// the questions, so they are about what the page actually says. This is for
+    /// the entries that predate that, and for when the questions have gone stale.
+    func retest(_ concept: Concept) {
+        guard busy == nil else { return }
+        guard Tutor.isAvailable else { note = "The claude CLI was not found."; return }
+        busy = concept.id
+        Task.detached {
+            let questions = Tutor.retest(concept)
+            await MainActor.run {
+                self.busy = nil
+                guard !questions.isEmpty else {
+                    self.note = "No test came back — \(Tutor.lastError ?? "no detail")"
+                    return
+                }
+                var c = concept
+                c.questions = questions
                 Store.shared.save(c)
                 self.load()
             }

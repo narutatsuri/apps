@@ -27,6 +27,16 @@ container the notes are trapped inside.
     ⌘1…⌘6            colour
     ⌘R               render the markdown / back to editing
     ⌘⌫               delete (moved to .trash inside that folder, not gone)
+    ⌘L               mark important — never delete: the trash button goes away
+                     and ⌘⌫ does nothing until the lock is toggled off
+    ⌃⌫               delete the previous word
+    # / ## / ###     retyped at the front of a heading (with the space):
+                     sets its level to what you typed — down as well as up
+    ⌫ at line start  on a heading: back to plain text (then merges as usual)
+
+`![alt](path)` shows the picture in place — fitted to the note's width,
+aspect kept — and writes back exactly as typed. Jot itself has no drop
+target for images; Lanes, which shares this editor, does.
 
 Emphasis writes markdown *into the text* — `**bold**` is stored as `**bold**`
 and drawn bold as you type. That is the difference from the built-in Stickies

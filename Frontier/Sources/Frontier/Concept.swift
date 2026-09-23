@@ -44,6 +44,25 @@ struct Concept: Identifiable, Equatable {
     /// is answerable.
     var addedOn: Date = Date()
     var learnedOn: Date?
+    /// When a half-learned concept should come back round.
+    ///
+    /// "Still learning" used to be a permanent +12, so one press pinned a
+    /// concept to the top of every session for the rest of time and the daily
+    /// pick stopped being a pick. Marking it now schedules it instead: it drops
+    /// out of the running until this date, then returns at full weight. Nil for
+    /// anything that has never been marked, and for concepts marked before this
+    /// existed — those are treated as due, which is what they effectively were.
+    var dueOn: Date?
+    /// How many times this has been carried over. Kept because "this one took
+    /// five passes" is worth knowing.
+    var revisits: Int = 0
+    /// The gap currently being used, in days. Stored rather than derived from
+    /// `revisits`, because it now grows and shrinks with how the test went and
+    /// a count cannot express "that went badly, start again".
+    var intervalDays: Int = 0
+    /// The last test score, 0…1. Shown next to the concept, and the thing the
+    /// next interval is computed from.
+    var lastScore: Double?
     /// Anything time-sensitive — a release, a new architecture — so the daily
     /// pick can favour it while it is still news.
     var dated: Date?
@@ -62,6 +81,31 @@ struct Concept: Identifiable, Equatable {
     /// still keeps every number, mechanism and citation: not a simpler claim,
     /// the same claim with the steps put back in.
     var walkthrough: String = ""
+
+    /// The test at the bottom of the entry. Written at the same time as the
+    /// entry, by the same call, so the questions are about what the page
+    /// actually says rather than about the title.
+    var questions: [Question] = []
+
+    /// One question at the end of an entry.
+    ///
+    /// Two kinds, one type, because they differ only in how they are marked. A
+    /// question with choices is marked here, instantly and offline. A question
+    /// without them wants a written answer and is marked by the model against
+    /// `expected` — which is why `expected` is kept rather than thrown away
+    /// after generation: it is the mark scheme, and it is also the thing you
+    /// want to read once you have answered.
+    struct Question: Equatable {
+        var prompt: String
+        /// Empty for a written question.
+        var choices: [String] = []
+        /// Index into `choices`. Nil for a written question.
+        var correct: Int?
+        /// What a full-marks answer contains.
+        var expected: String = ""
+
+        var isWritten: Bool { choices.isEmpty }
+    }
 
     struct Source: Equatable {
         var title: String
@@ -104,6 +148,10 @@ extension Concept {
         if !courses.isEmpty { out += "courses: \(courses.joined(separator: "; "))\n" }
         out += "added: \(Self.iso.string(from: addedOn))\n"
         if let learnedOn { out += "learned: \(Self.iso.string(from: learnedOn))\n" }
+        if let dueOn { out += "due: \(Self.iso.string(from: dueOn))\n" }
+        if revisits > 0 { out += "revisits: \(revisits)\n" }
+        if intervalDays > 0 { out += "interval: \(intervalDays)\n" }
+        if let lastScore { out += "score: \(String(format: "%.2f", lastScore))\n" }
         if let dated { out += "dated: \(Self.iso.string(from: dated))\n" }
         for s in sources {
             // Pipe-separated: a URL cannot contain an unescaped pipe, and a title
@@ -127,10 +175,68 @@ extension Concept {
             // step with its entry the first time one was edited by hand.
             out += "\n" + Self.walkthroughMarker + "\n\n" + walkthrough + "\n"
         }
+        if !questions.isEmpty {
+            out += "\n" + Self.testMarker + "\n\n" + Self.markdown(for: questions)
+        }
         return out
     }
 
     static let walkthroughMarker = "<!-- walkthrough -->"
+    static let testMarker = "<!-- test -->"
+
+    /// The test, in the same shape the model is asked to produce it.
+    ///
+    /// One format, not two: what comes back from the model is what goes in the
+    /// file, so there is no wire format to keep in step with a storage format,
+    /// and a question can be fixed by editing the note in any editor. It is
+    /// ordinary markdown — `###` for the question, task-list boxes for choices
+    /// with the answer ticked, a blockquote for the mark scheme — so it stays
+    /// readable if it is ever looked at raw.
+    static func markdown(for questions: [Question]) -> String {
+        questions.map { q in
+            var out = "### " + q.prompt + "\n"
+            for (i, choice) in q.choices.enumerated() {
+                out += "- [\(i == q.correct ? "x" : " ")] " + choice + "\n"
+            }
+            if !q.expected.isEmpty {
+                // Blockquoted so a multi-line mark scheme cannot be mistaken for
+                // the next question.
+                for line in q.expected.components(separatedBy: "\n") {
+                    out += "> " + line + "\n"
+                }
+            }
+            return out
+        }.joined(separator: "\n")
+    }
+
+    /// Reads the above back. Tolerant on purpose: this file is meant to be
+    /// edited by hand, and a question that loses its mark scheme is better than
+    /// a parse that throws the whole test away.
+    static func questions(fromMarkdown text: String) -> [Question] {
+        var out: [Question] = []
+        for raw in text.components(separatedBy: "\n") {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("###") {
+                let prompt = line.drop(while: { $0 == "#" })
+                    .trimmingCharacters(in: .whitespaces)
+                guard !prompt.isEmpty else { continue }
+                out.append(Question(prompt: prompt))
+            } else if line.hasPrefix("- ["), !out.isEmpty {
+                let ticked = line.hasPrefix("- [x]") || line.hasPrefix("- [X]")
+                let text = String(line.dropFirst(5)).trimmingCharacters(in: .whitespaces)
+                guard !text.isEmpty else { continue }
+                if ticked { out[out.count - 1].correct = out[out.count - 1].choices.count }
+                out[out.count - 1].choices.append(text)
+            } else if line.hasPrefix(">"), !out.isEmpty {
+                let text = String(line.dropFirst()).trimmingCharacters(in: .whitespaces)
+                let existing = out[out.count - 1].expected
+                out[out.count - 1].expected = existing.isEmpty ? text : existing + "\n" + text
+            }
+        }
+        // A multiple-choice question with no ticked answer cannot be marked, and
+        // silently marking every attempt wrong is worse than not asking it.
+        return out.filter { !$0.choices.isEmpty ? $0.correct != nil : !$0.prompt.isEmpty }
+    }
 
     private static func escape(_ s: String) -> String {
         s.replacingOccurrences(of: "\n", with: " ")
@@ -177,9 +283,21 @@ extension Concept {
             .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         self.addedOn = front["added"].flatMap { Self.iso.date(from: $0) } ?? Date()
         self.learnedOn = front["learned"].flatMap { Self.iso.date(from: $0) }
+        self.dueOn = front["due"].flatMap { Self.iso.date(from: $0) }
+        self.revisits = front["revisits"].flatMap { Int($0) } ?? 0
+        self.intervalDays = front["interval"].flatMap { Int($0) } ?? 0
+        self.lastScore = front["score"].flatMap { Double($0) }
         self.dated = front["dated"].flatMap { Self.iso.date(from: $0) }
         self.sources = sources
-        let rest = lines[(close + 1)...].joined(separator: "\n")
+        // Three sections in a fixed order — entry, walkthrough, test — split off
+        // the back so a marker that never got written does not shift the others.
+        var rest = lines[(close + 1)...].joined(separator: "\n")
+        if let split = rest.range(of: Self.testMarker) {
+            self.questions = Self.questions(fromMarkdown: String(rest[split.upperBound...]))
+            rest = String(rest[..<split.lowerBound])
+        } else {
+            self.questions = []
+        }
         if let split = rest.range(of: Self.walkthroughMarker) {
             self.body = String(rest[..<split.lowerBound])
                 .trimmingCharacters(in: .whitespacesAndNewlines)

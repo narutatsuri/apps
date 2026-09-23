@@ -7,8 +7,16 @@ struct PopoverView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             ProviderSection(title: "Claude", snapshot: store.claude, tick: store.tick)
-            Divider().padding(.vertical, 12)
-            ProviderSection(title: "Codex", snapshot: store.codex, tick: store.tick)
+            if store.codex.isEmpty {
+                Divider().padding(.vertical, 12)
+                ProviderSection(title: "Codex", snapshot: ProviderSnapshot(
+                    error: "No login found — run `codex login`."), tick: store.tick)
+            }
+            ForEach(store.codex) { slot in
+                Divider().padding(.vertical, 12)
+                ProviderSection(title: slot.account.title, snapshot: slot.snapshot,
+                                tick: store.tick)
+            }
             Divider().padding(.top, 12).padding(.bottom, 8)
             footer
         }
@@ -43,9 +51,14 @@ struct PopoverView: View {
 
     private var controls: some View {
         HStack(spacing: 8) {
-            Text(refreshedLabel)
+            // What the last press did. Without this a refresh inside the
+            // cooldown looked identical to a broken button.
+            Text(store.manualNote ?? refreshedLabel)
                 .font(.system(size: 10))
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(store.manualNote == nil ? .tertiary : .secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .help(store.manualNote ?? "")
             Spacer()
             Button {
                 Task { await store.manualRefresh() }
@@ -66,7 +79,8 @@ struct PopoverView: View {
 
     private var refreshedLabel: String {
         _ = store.tick
-        guard let at = [store.claude.fetchedAt, store.codex.fetchedAt].compactMap({ $0 }).max() else {
+        guard let at = ([store.claude.fetchedAt] + store.codex.map(\.snapshot.fetchedAt))
+                .compactMap({ $0 }).max() else {
             return store.isRefreshing ? "Refreshing…" : "Not yet loaded"
         }
         let s = Int(-at.timeIntervalSinceNow)
@@ -91,6 +105,16 @@ private struct ProviderSection: View {
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 5).padding(.vertical, 1.5)
                         .background(Capsule().fill(.quaternary))
+                }
+                // Two sections both called "Codex" need the email to tell
+                // them apart — and to catch the case where they are the same
+                // login twice.
+                if let who = snapshot.subtitle {
+                    Text(who)
+                        .font(.system(size: 9))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                 }
                 Spacer()
                 if let note = snapshot.note {

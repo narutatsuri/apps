@@ -12,17 +12,14 @@ struct FrontierApp: App {
         MainActor.assumeIsolated { CLI.run(args) }
         TitlebarZoom.install()
         ZoomDiagnose.scheduleIfAsked()
-        LayoutDump.scheduleIfAsked()
-        WebProbe.scheduleIfAsked()
+        WindowCheck.scheduleIfAsked()
     }
 
     var body: some Scene {
-        // The real window is AppKit's, built in the delegate. Inside the SwiftUI
-        // Window scene's own AppKitWindow, a WKWebView never composites on this
-        // macOS — full DOM, correct frame, visible, alpha 1, zero paint, even
-        // when added by plain AppKit (FRONTIER_INJECT). The same content in a
-        // plain NSWindow + NSHostingView paints (FRONTIER_WEBPROBE probes 2 and
-        // 3, toolbar included). Settings is the minimal scene SwiftUI demands.
+        // The real window is AppKit's, built in the delegate: a SwiftUI Window
+        // scene restores its saved frame at launch, which is exactly the move
+        // that stops the window compositing the reading pane's web view (see
+        // makeWindow). Settings is the minimal scene SwiftUI demands.
         Settings { EmptyView() }
     }
 }
@@ -55,7 +52,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // One curriculum, one window; closing hides rather than deallocates,
         // so a Dock click brings the same window back.
         win.isReleasedWhenClosed = false
-        win.contentView = NSHostingView(rootView: ContentView(model: model))
+        let hosting = NSHostingView(rootView: ContentView(model: model))
+        // The window sizes the content, never the other way round.
+        //
+        // By default an NSHostingView publishes its SwiftUI content's minimum
+        // size as the window's contentMinSize, and the sidebar List asks for
+        // the height of every row it holds — measured at contentMinSize
+        // 373×3522 against a 949pt screen. The window is born at its saved
+        // 868pt, and then the frame restore armed below is a resize, which
+        // AppKit clamps up to that minimum: the window silently grows to 3554pt
+        // one second after launch, most of it off the bottom of the display.
+        // The List scrolls perfectly well in a small window; it just must not
+        // get a vote on how big the window is.
+        if #available(macOS 13.0, *) { hosting.sizingOptions = [] }
+        win.contentView = hosting
         win.makeKeyAndOrderFront(nil)
         // Frame persistence is armed only after the first commit. It restores
         // the frame the window was already born at, so nothing jumps.

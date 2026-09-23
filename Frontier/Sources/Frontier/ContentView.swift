@@ -11,48 +11,17 @@ struct ContentView: View {
     /// is how you like to read rather than a per-concept choice.
     @AppStorage("frontier.walkthrough") private var walkedThrough = true
     @State private var showingImport = false
-
-    /// FRONTIER_BARE=1/2/3 — content bisection levels for the compositing hunt.
-    private var bareLevel: Int {
-        Int(ProcessInfo.processInfo.environment["FRONTIER_BARE"] ?? "0") ?? 0
-    }
+    /// How tall the unwritten-concept blurb actually rendered. Measured rather
+    /// than assumed: a fixed height cut the rationale off mid-sentence.
+    @State private var blurbHeight: CGFloat = 120
 
     var body: some View {
-        Group {
-            switch bareLevel {
-            case 1:
-                ConceptPreview(markdown: "# L1\n\nPane alone under the shared modifiers. $x^2$")
-            case 2:
-                VStack(spacing: 0) {
-                    controlBar
-                    Divider()
-                    ConceptPreview(markdown: "# L2\n\nPane plus control bar. $x^2$")
-                }
-            case 3:
-                HStack(spacing: 0) {
-                    sidebar.frame(width: 280)
-                    Divider()
-                    ConceptPreview(markdown: "# L3\n\nPane plus sidebar. $x^2$")
-                }
-            default:
-                realBody
-            }
-        }
-        .onAppear { model.load(); ClickDiagnose.scheduleIfAsked(model: model) }
-        // FRONTIER_OVERLAY=1 — the same renderer, same window, *outside* the
-        // split view's detail column. Paints here + blank in the pane = the
-        // column; blank here too = the whole window cannot composite it.
-        .overlay(alignment: .topTrailing) {
-            if ProcessInfo.processInfo.environment["FRONTIER_OVERLAY"] == "1" {
-                ConceptPreview(markdown: "# Overlay probe\n\nSame window, outside the detail column. $x^2$")
-                    .frame(width: 320, height: 180)
-                    .border(.red)
-            }
-        }
-        .sheet(isPresented: $showingImport) { ImportSheet(model: model) }
-        .alert("Frontier", isPresented: .constant(model.note != nil)) {
-            Button("OK") { model.note = nil }
-        } message: { Text(model.note ?? "") }
+        realBody
+            .onAppear { model.load(); ClickDiagnose.scheduleIfAsked(model: model) }
+            .sheet(isPresented: $showingImport) { ImportSheet(model: model) }
+            .alert("Frontier", isPresented: .constant(model.note != nil)) {
+                Button("OK") { model.note = nil }
+            } message: { Text(model.note ?? "") }
     }
 
     private var realBody: some View {
@@ -152,6 +121,14 @@ struct ContentView: View {
                 ForEach(model.ready.filter { !todayIDs.contains($0.id) }
                             .prefix(20)) { row($0) }
             }
+            // Where "still learning" goes. Without this the concept simply
+            // disappears from the sidebar for a fortnight, which is the same
+            // thing a bug looks like.
+            if !model.deferred.isEmpty {
+                Section("Coming back — \(model.deferred.count)") {
+                    ForEach(model.deferred) { row($0) }
+                }
+            }
             // Every imported or followed course, as the whole path in its own
             // reading order. This is where "where is the RLHF book and how do
             // I get through it" is answered — Today and Ready gate what to do
@@ -211,9 +188,16 @@ struct ContentView: View {
                 Text(c.plainTitle).font(.system(size: 12))
                     .lineLimit(1)
             }
-            Text(c.area.label.uppercased())
-                .font(.system(size: 8, weight: .semibold)).tracking(0.5)
-                .foregroundStyle(.tertiary)
+            HStack(spacing: 5) {
+                Text(c.area.label.uppercased())
+                    .font(.system(size: 8, weight: .semibold)).tracking(0.5)
+                    .foregroundStyle(.tertiary)
+                if let when = c.revisitDescription() {
+                    Text(when)
+                        .font(.system(size: 8, weight: .semibold)).tracking(0.5)
+                        .foregroundStyle(.orange.opacity(0.8))
+                }
+            }
         }
         .tag(c.id)
     }
@@ -254,7 +238,9 @@ struct ContentView: View {
             } else if concept.isWritten {
                 VStack(alignment: .leading, spacing: 0) {
                     modePicker(concept)
-                    ConceptPreview(markdown: document(concept))
+                    ConceptPreview(markdown: document(concept),
+                                   questions: concept.questions,
+                                   onScore: { model.record(score: $0, for: concept) })
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
                 // The one flexible child, forced to *accept* the pane's height.
@@ -271,9 +257,18 @@ struct ContentView: View {
                 // Unwritten: the heading and the reason it is on the list, then
                 // the offer to write it — where you are looking, not stranded at
                 // the bottom of an empty pane below a hundred points of nothing.
+                //
+                // The blurb is sized to what it actually rendered. It used to be
+                // pinned at 150pt, which is fine for a one-line rationale and
+                // cuts a three-line one off mid-sentence — "…with τ calibrated
+                // at the 25th percentile of" was the whole of what an imported
+                // concept had to say for itself. Capped, because a rationale
+                // that runs long should not push the offer off the screen.
                 VStack(alignment: .leading, spacing: 0) {
-                    ConceptPreview(markdown: document(concept))
-                        .frame(height: 150)
+                    ConceptPreview(markdown: document(concept)) { height in
+                        blurbHeight = height
+                    }
+                    .frame(height: min(max(blurbHeight, 90), 460))
                     unwritten(concept)
                     Spacer(minLength: 0)
                 }
@@ -283,7 +278,31 @@ struct ContentView: View {
             HStack(spacing: 10) {
                 Button("I know this") { model.mark(concept, .known) }
                     .disabled(concept.isKnown)
-                Button("Still learning") { model.mark(concept, .learning) }
+
+                // "Still learning" is gone. It was a button that said "not yet"
+                // and grew the gap whether or not you were learning anything;
+                // the test at the bottom of the page says the same thing with
+                // evidence behind it, and the gap follows the score. What is
+                // left here is a pointer to it, and the last result.
+                if concept.isWritten, !concept.questions.isEmpty {
+                    Text("Test at the bottom of the page")
+                        .font(.system(size: 10)).foregroundStyle(.tertiary)
+                } else if concept.isWritten {
+                    Button("Write the test") { model.retest(concept) }
+                        .controlSize(.small)
+                        .disabled(model.busy != nil)
+                        .help("This entry was written before tests existed. "
+                            + "Generate six questions for it.")
+                }
+                if let score = concept.lastScore {
+                    Text("last \(Int((score * 100).rounded()))%")
+                        .font(.system(size: 10))
+                        .foregroundStyle(score >= 0.75 ? .green : .orange)
+                }
+                if let when = concept.revisitDescription() {
+                    Text(when)
+                        .font(.system(size: 10)).foregroundStyle(.orange.opacity(0.9))
+                }
                 Spacer()
                 if !concept.sources.isEmpty { sourceSummary(concept) }
                 if concept.isWritten {

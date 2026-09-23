@@ -472,6 +472,7 @@ enum Tutor {
     struct Written {
         var body: String
         var sources: [Concept.Source]
+        var questions: [Concept.Question] = []
     }
 
     /// The explanation, with every claim attached to something checkable.
@@ -513,18 +514,23 @@ enum Tutor {
             train, or trust. Say plainly if the honest answer is "mostly it does not, \
             but you will hit it when...")
 
-            ## Check yourself
-            (2-3 questions with short answers, testing the mechanism rather than the vocabulary)
-
             ## Not verified
             (anything from rule 2, or "nothing" if everything above is sourced)
 
             Then, after a line containing only SOURCES:, list every source used, \
             one per line, as: Title | https://url
             Only URLs you are confident exist. A guessed URL is worse than none.
+
+            Then, after a line containing only TEST:, write the test for this \
+            entry. \(testFormat)
             """
         guard let reply = ask(prompt) else { return nil }
-        let parts = reply.components(separatedBy: "\nSOURCES:")
+        // TEST: is split off first, so a URL or a question containing the word
+        // SOURCES cannot cut the reply in the wrong place.
+        let afterTest = reply.components(separatedBy: "\nTEST:")
+        let questions = afterTest.count > 1
+            ? Concept.questions(fromMarkdown: afterTest[1]) : []
+        let parts = afterTest[0].components(separatedBy: "\nSOURCES:")
         let body = parts[0].trimmingCharacters(in: .whitespacesAndNewlines)
         var sources: [Concept.Source] = []
         if parts.count > 1 {
@@ -536,6 +542,122 @@ enum Tutor {
                 sources.append(.init(title: bits[0], url: bits[1]))
             }
         }
-        return Written(body: body, sources: sources)
+        return Written(body: body, sources: sources, questions: questions)
+    }
+
+    // MARK: - The test
+
+    /// How the test is to be written. Shared by the entry prompt and by
+    /// `retest`, so there is one description of the format and one place it can
+    /// drift from the parser.
+    ///
+    /// The format is the file format: what comes back is written into the note
+    /// verbatim, so a bad question can be fixed in any editor.
+    static let testFormat = """
+        Six questions. Four multiple-choice, then two written. Hard ones: \
+        someone who has read the entry once and understood the words but not the \
+        mechanism should score badly. Test what follows from what — a number \
+        arrived at, a consequence, a case where the obvious answer is wrong — \
+        never which word means what.
+
+        Exact format, and nothing else after TEST::
+
+        ### <question>
+        - [ ] <wrong but tempting>
+        - [x] <right>
+        - [ ] <wrong but tempting>
+        - [ ] <wrong but tempting>
+
+        ### <written question>
+        > <what a full-marks answer contains, including the arithmetic>
+
+        Rules:
+        - Exactly one ticked box per multiple-choice question.
+        - Distractors have to be *plausible*: the answer someone gets by \
+        applying the right idea in the wrong place, or by remembering the \
+        headline number and not the constraint. Never filler.
+        - The two written questions ask for a derivation or a judgement, not a \
+        definition. Their blockquote is the mark scheme and will be shown after \
+        answering, so write it to be read.
+        - Mathematics in LaTeX, inline $…$, exactly as in the entry.
+        - Every answer must be decidable from the entry above.
+        """
+
+    /// A fresh test for a concept that already has an entry — for when the
+    /// questions are stale, or were written before this existed.
+    static func retest(_ concept: Concept) -> [Concept.Question] {
+        let prompt = """
+            \(reader)
+
+            Here is an entry they have read. Write a test on it.
+
+            # \(concept.title)
+
+            \(concept.walkthrough.isEmpty ? concept.body : concept.walkthrough)
+
+            \(testFormat)
+            """
+        guard let reply = ask(prompt, timeout: 900) else { return [] }
+        // Tolerate a preamble: the questions start at the first ###.
+        let body = reply.components(separatedBy: "\nTEST:").last ?? reply
+        return Concept.questions(fromMarkdown: body)
+    }
+
+    /// What the written answers were worth, 0…1 each, and why.
+    ///
+    /// One call for both, because two calls is twice the wait for no more
+    /// information. The model is told to mark against the mark scheme rather
+    /// than its own opinion, which is the difference between grading and
+    /// arguing.
+    struct Marked {
+        var score: Double
+        var comment: String
+    }
+
+    static func grade(_ answers: [(question: Concept.Question, answer: String)]) -> [Marked] {
+        guard !answers.isEmpty else { return [] }
+        let items = answers.enumerated().map { i, pair in
+            """
+            ---
+            Question \(i + 1): \(pair.question.prompt)
+            Mark scheme: \(pair.question.expected)
+            Their answer: \(pair.answer.isEmpty ? "(blank)" : pair.answer)
+            """
+        }.joined(separator: "\n")
+        let prompt = """
+            Mark these answers against their mark schemes. You are marking, not \
+            teaching: the question is how much of the scheme the answer contains, \
+            not whether you would have said it differently.
+
+            \(items)
+
+            For each question, one line, in order, exactly:
+
+            SCORE <n> | <what was missing, or what was right, in one sentence>
+
+            where <n> is 0, 25, 50, 75 or 100. Be strict. A blank answer is 0. \
+            An answer that states the conclusion without the reasoning the scheme \
+            asks for is at most 50. Full marks means the scheme is covered.
+            """
+        guard let reply = ask(prompt, timeout: 600) else { return [] }
+        return parseMarks(reply)
+    }
+
+    /// The marks out of a reply. Split out so it can be checked without a model
+    /// call: a grader whose output stops being parsed marks every written answer
+    /// as unmarked, and nothing on screen would say why.
+    static func parseMarks(_ reply: String) -> [Marked] {
+        var out: [Marked] = []
+        for line in reply.components(separatedBy: "\n") {
+            let t = line.trimmingCharacters(in: .whitespaces)
+            guard t.uppercased().hasPrefix("SCORE") else { continue }
+            let rest = String(t.dropFirst(5)).trimmingCharacters(in: .whitespaces)
+            let bits = rest.components(separatedBy: "|")
+            guard let n = Double(bits[0].trimmingCharacters(in: .whitespaces)) else { continue }
+            out.append(Marked(score: min(1, max(0, n / 100)),
+                              comment: bits.count > 1
+                                  ? bits[1].trimmingCharacters(in: .whitespaces) : ""))
+        }
+        return out
     }
 }

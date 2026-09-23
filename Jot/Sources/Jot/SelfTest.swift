@@ -60,6 +60,14 @@ enum SelfTest {
         check("round-trip: floats false survives",
               back.floats == false, "the default is true, so this is the one that can silently flip")
         check("round-trip: rendered", back.rendered == true)
+        check("round-trip: important survives",
+              { var o = s; o.important = true
+                return Sticky(markdown: o.markdown, id: "x")?.important == true }(),
+              "a never-delete flag that does not survive a relaunch protects nothing")
+        check("a note never marked important carries no important field",
+              !s.markdown.contains("important"),
+              "every pre-existing file must round-trip byte-identically")
+        check("absent means not important", back.important == false)
         check("round-trip: open state",
               { var o = s; o.isOpen = false
                 return Sticky(markdown: o.markdown, id: "x")?.isOpen == false }(),
@@ -162,6 +170,48 @@ enum SelfTest {
         _ = trashed
         Store.shared.reload()
 
+        // --- important means the store refuses, not that a button hides
+        //
+        // The view drops its delete button when the flag is on, but the button
+        // is courtesy. The guarantee is here: delete() declines, and even the
+        // emptied-out path — the one that bins blank notes — leaves the file.
+        let keepID = "selftest-important-" + Sticky.newID()
+        let keepURL = Store.shared.url(for: keepID)
+        try? "---\nid: \(keepID)\nimportant: true\n---\n\ndo not lose this\n"
+            .write(to: keepURL, atomically: true, encoding: .utf8)
+        Store.shared.reload()
+        check("the important probe was picked up",
+              Store.shared.sticky(keepID)?.important == true)
+
+        Store.shared.delete(keepID)
+        check("delete() refuses an important note",
+              Store.shared.sticky(keepID) != nil
+              && FileManager.default.fileExists(atPath: keepURL.path),
+              "the missing button is the view's courtesy; this is the guarantee")
+
+        var blanked = Store.shared.sticky(keepID) ?? Sticky(id: keepID)
+        blanked.text = ""
+        Store.shared.save(blanked, debounce: 0)
+        Store.shared.flush(keepID)
+        check("even emptied out, an important note keeps its file",
+              FileManager.default.fileExists(atPath: keepURL.path),
+              "blank-means-done must not outrank never-delete")
+
+        var released = Store.shared.sticky(keepID) ?? blanked
+        released.important = false
+        Store.shared.save(released, debounce: 0)
+        Store.shared.flush(keepID)
+        Store.shared.delete(keepID)
+        check("toggled off, the note is deletable again",
+              Store.shared.sticky(keepID) == nil
+              && !FileManager.default.fileExists(atPath: keepURL.path),
+              "the flag is a latch, not a life sentence")
+        for name in (try? FileManager.default.contentsOfDirectory(atPath: Store.trash.path))?
+            .filter({ $0.hasPrefix(keepID) }) ?? [] {
+            try? FileManager.default.removeItem(at: Store.trash.appendingPathComponent(name))
+        }
+        Store.shared.reload()
+
         // --- the parser, which is invisible in a screenshot and exact here
         func kinds(_ text: String) -> [Highlighter.Kind] {
             Highlighter.styles(in: text).map(\.kind)
@@ -180,6 +230,34 @@ enum SelfTest {
         check("bold-italic is both, not bold with stray stars",
               styled("***both***", .bold) == "both" && styled("***both***", .italic) == "both")
         check("highlight is its own thing", styled("==look here== ok", .highlight) == "look here")
+
+        // --- emphasis around an equation
+        //
+        // Maths claims its range so nothing styles *inside* it — the `*` in
+        // `$a^*$` is a superscript. That rule used to reject any emphasis whose
+        // range merely touched an equation, so a highlight wrapping one was
+        // discarded whole and its `==` stayed on screen as literal text.
+        check("a highlight may wrap an equation",
+              styled("==energy $x^2$ here==", .highlight) == "energy $x^2$ here",
+              "both markers are outside the maths; only straddling is ambiguous")
+        check("so may bold", styled("**energy $x^2$ here**", .bold) == "energy $x^2$ here")
+        check("so may strikethrough",
+              styled("~~gone $x^2$ here~~", .strikethrough) == "gone $x^2$ here")
+        check("a highlight may contain an equals sign",
+              styled("==a = b==", .highlight) == "a = b",
+              "the old pattern forbade `=` in the content, so any highlight over "
+            + "an equation failed twice over")
+        check("and an equation full of them",
+              styled("==energy $E=mc^2$ here==", .highlight) == "energy $E=mc^2$ here")
+        check("emphasis that straddles an equation is still rejected",
+              styled("==a $b== c$", .highlight) == nil,
+              "the closing == is inside the maths, so what was meant is anyone's guess")
+        check("a star inside maths is still a superscript, not italic",
+              styled("$a^* + b^*$", .italic) == nil)
+        check("two highlights on one line stay two",
+              Highlighter.styles(in: "==first== and ==second==")
+                  .filter { $0.kind == .highlight }.count == 2,
+              "the lazy pattern must not run the first opener to the last closer")
         check("headings style the text after the hashes",
               styled("## Ideas for later", .heading(level: 2)) == "Ideas for later")
         check("heading level is read from the hashes",
@@ -253,6 +331,406 @@ enum SelfTest {
         check("the styling lands on the word", style("a **strong** word", at: 2) == .bold)
         check("and not on its neighbours", style("a **strong** word", at: 0) == [])
         check("bold-italic carries both", style("***both***", at: 0) == [.bold, .italic])
+        // The equation is one attachment character; index 7 is it, in "energy ⍰ here".
+        check("the equation inside a highlight is itself highlighted",
+              style("==energy $x^2$ here==", at: 7) == .highlight,
+              "otherwise the highlight has a hole in it where the maths is, and "
+            + "the markdown written back out breaks into two highlights")
+        check("an equation outside any emphasis carries no style",
+              style("energy $x^2$ here", at: 7) == [])
+        // An equation is a picture rendered over an opaque background, so it
+        // paints over any highlight drawn behind it — measured as a rectangular
+        // hole in the tint. The highlight has to go into the render instead.
+        check("a highlighted equation is drawn against the highlight",
+              rgbText(Attributed.mathPaper(style: .highlight, paper: .white))
+                  != rgbText(NSColor.white),
+              "otherwise the tint stops either side of the maths")
+        check("an unhighlighted one is drawn against the paper",
+              rgbText(Attributed.mathPaper(style: [], paper: .white)) == rgbText(NSColor.white))
+        check("the highlight is flattened, not left translucent",
+              Attributed.mathPaper(style: .highlight, paper: .white).alphaComponent == 1,
+              "the renderer wants a solid background")
+
+        // --- images: `![alt](path)` is one picture, and round-trips exactly
+        check("an image link is an image, not a link",
+              kinds("see ![shot](_assets/a.png) here").contains { if case .image = $0 { return true }; return false }
+              && !kinds("see ![shot](_assets/a.png) here").contains { if case .link = $0 { return true }; return false },
+              "the `[alt](path)` inside must not be read as a link")
+        check("a plain link is still a link",
+              kinds("see [docs](https://x.y) here").contains { if case .link = $0 { return true }; return false })
+        check("a bang before a space is not an image",
+              !kinds("wow! [docs](https://x.y)").contains { if case .image = $0 { return true }; return false })
+        for text in ["see ![shot](_assets/a.png) here",
+                     "==a ![i](p.png) b==",
+                     "**![only](x.jpg)**",
+                     "![](no-alt.png) and $x$ and ![two](2.png)"] {
+            let back = Attributed.markdown(from: Attributed.make(from: text, ink: .black, paper: .white))
+            check("an image round-trips byte-identically: \(text)", back == text, "got \(back)")
+        }
+        let pictured = Attributed.make(from: "a ![shot](missing.png) b", ink: .black, paper: .white)
+        check("the picture is one attachment character carrying its source",
+              pictured.length == 5
+              && (pictured.attribute(Attributed.imageKey, at: 2, effectiveRange: nil) as? ImageSpec)?.path == "missing.png"
+              && (pictured.attribute(.attachment, at: 2, effectiveRange: nil) as? ImageAttachment)?.image != nil,
+              "a file that cannot be found still shows *something* where it was")
+
+        // A picture fits the column it is in: asked by a 380pt column, a
+        // 600×300 image comes back 354 wide (380 − 2×5 padding − 2×8 margin)
+        // and 177 tall; asked by a wide one, it stays its own size.
+        let big = NSImage(size: NSSize(width: 600, height: 300))
+        Attributed.imageResolver = { _ in big }
+        let fitted = Attributed.make(from: "![big](anywhere.png)", ink: .black, paper: .white)
+        if let att = fitted.attribute(.attachment, at: 0, effectiveRange: nil) as? ImageAttachment {
+            let narrow = NSTextContainer(size: NSSize(width: 380, height: 1000))
+            let wide = NSTextContainer(size: NSSize(width: 1000, height: 1000))
+            let inNarrow = att.attachmentBounds(for: narrow, proposedLineFragment: .zero,
+                                                glyphPosition: .zero, characterIndex: 0)
+            let inWide = att.attachmentBounds(for: wide, proposedLineFragment: .zero,
+                                              glyphPosition: .zero, characterIndex: 0)
+            check("a picture fits its column, aspect kept",
+                  inNarrow.size == NSSize(width: 354, height: 177), "got \(inNarrow.size)")
+            check("and is never scaled up past its own size",
+                  inWide.size == NSSize(width: 600, height: 300), "got \(inWide.size)")
+        } else {
+            check("a resolved picture is an ImageAttachment", false)
+        }
+        Attributed.imageResolver = { NSImage(contentsOfFile: $0) }
+
+        // --- what counts as changing a note
+        //
+        // The menu sorts by `updated`, and saves happen for things that are not
+        // edits — a window moved, a note opened, the state written back at
+        // launch. Stamping the time on all of them made every note share a
+        // timestamp after a restart and the order arbitrary.
+        let stampID = "selftest-stamp-" + Sticky.newID()
+        var stamped = Sticky(id: stampID)
+        stamped.text = "the words"
+        Store.shared.save(stamped, debounce: 0)
+        Store.shared.flush(stampID)
+        let firstStamp = Store.shared.sticky(stampID)?.updatedAt
+
+        var moved = Store.shared.sticky(stampID) ?? stamped
+        moved.frame = CGRect(x: 10, y: 10, width: 300, height: 200)
+        Store.shared.save(moved, debounce: 0)
+        Store.shared.flush(stampID)
+        check("moving a note is not editing it",
+              Store.shared.sticky(stampID)?.updatedAt == firstStamp,
+              "otherwise a restart restamps every note and the list order is lost")
+
+        var edited = Store.shared.sticky(stampID) ?? stamped
+        edited.text = "different words"
+        Store.shared.save(edited, debounce: 0)
+        Store.shared.flush(stampID)
+        check("changing the words is",
+              Store.shared.sticky(stampID)?.updatedAt != firstStamp,
+              "a note you just typed into has to sort to the top")
+        try? FileManager.default.removeItem(at: Store.shared.url(for: stampID))
+        Store.shared.reload()
+
+        // --- typing a heading, one keystroke at a time
+        //
+        // The reported bug: "# T" collapses into a heading, and then the very
+        // next letter typed comes out unformatted, while everything after it is
+        // fine. Reproduced here by driving a real NSTextView through the real
+        // Coordinator the way typing does — insertText goes through the same
+        // delegate path as the keyboard.
+        let typeParent = MarkdownEditor(text: .constant(""), paper: .white,
+                                        handle: nil as EditorHandle?, ink: .black)
+        let typeCoord = MarkdownEditor.Coordinator(typeParent)
+        let typeStorage = NSTextStorage()
+        let typeLayout = NSLayoutManager()
+        typeStorage.addLayoutManager(typeLayout)
+        let typeContainer = NSTextContainer(
+            size: NSSize(width: 400, height: CGFloat.greatestFiniteMagnitude))
+        typeLayout.addTextContainer(typeContainer)
+        let typeView = JotTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 300),
+                                   textContainer: typeContainer)
+        typeView.isRichText = true
+        typeView.allowsUndo = true
+        typeView.delegate = typeCoord
+        typeView.typingAttributes = Attributed.attributes(style: [], ink: .black)
+        typeCoord.view = typeView
+
+        for ch in "# Title" {
+            typeView.insertText(String(ch), replacementRange: typeView.selectedRange())
+        }
+
+        check("typing '# Title' leaves the buffer reading 'Title'",
+              typeView.string == "Title",
+              "was '\(typeView.string)' — the marker should have collapsed at the first letter")
+        var unstyled: [Int] = []
+        for i in 0..<(typeView.textStorage?.length ?? 0) {
+            let level = typeView.textStorage?.attribute(Attributed.headingKey, at: i,
+                                                        effectiveRange: nil) as? Int ?? 0
+            if level != 1 { unstyled.append(i) }
+        }
+        check("every letter of the title is heading-styled",
+              unstyled.isEmpty,
+              "unstyled at \(unstyled) — index 1 is the reported bug: the collapse "
+            + "suppresses the selection callback that refreshes typingAttributes, "
+            + "so the next keystroke inserts with the stale plain ones")
+        check("and the file gets one heading, not a heading with a plain letter inside",
+              Attributed.markdown(from: typeView.attributedString()) == "# Title",
+              "was '\(Attributed.markdown(from: typeView.attributedString()))'")
+
+        // --- reformatting a heading that has already collapsed
+        //
+        // Once "## Title" is styled there are no hashes left on screen to edit,
+        // so retyping the marker is the only way to change the level — and the
+        // marker you type is the level you mean, absolutely. "# " makes it a
+        // title whatever it was; "### " a sub-sub-heading; down as well as up.
+        func typeAtFront(_ marker: String) {
+            typeView.setSelectedRange(NSRange(location: 0, length: 0))
+            for ch in marker {
+                typeView.insertText(String(ch), replacementRange: typeView.selectedRange())
+            }
+        }
+        // The buffer holds "# Title" from the sequence above.
+        typeAtFront("## ")
+        check("typing '## ' at the front of a title makes it a subtitle",
+              Attributed.markdown(from: typeView.attributedString()) == "## Title",
+              "was '\(Attributed.markdown(from: typeView.attributedString()))' — "
+            + "the typed marker is the level, not an increment")
+        check("and the screen shows no hashes",
+              typeView.string == "Title", "was '\(typeView.string)'")
+        typeAtFront("# ")
+        check("typing '# ' takes it back to a title — down, not just up",
+              Attributed.markdown(from: typeView.attributedString()) == "# Title",
+              "was '\(Attributed.markdown(from: typeView.attributedString()))' — "
+            + "reformatting has to work in both directions")
+        typeAtFront("### ")
+        check("and '### ' jumps straight to level three",
+              Attributed.markdown(from: typeView.attributedString()) == "### Title",
+              "no stepping through level two on the way")
+        check("the next letter typed is styled at the new level",
+              { typeView.setSelectedRange(NSRange(location: 0, length: 0))
+                typeView.insertText("A", replacementRange: typeView.selectedRange())
+                let level = typeView.textStorage?.attribute(Attributed.headingKey, at: 0,
+                            effectiveRange: nil) as? Int
+                typeView.setSelectedRange(NSRange(location: 1, length: 0))
+                typeView.deleteBackward(nil)
+                return level == 3 }())
+        check("hashes without a trailing space do not re-level",
+              { typeView.setSelectedRange(NSRange(location: 0, length: 0))
+                typeView.insertText("#", replacementRange: typeView.selectedRange())
+                let out = Attributed.markdown(from: typeView.attributedString())
+                typeView.deleteBackward(nil)
+                return out == "### #Title" }(),
+              "the space is the trigger, same as every other marker — a heading "
+            + "whose text happens to start with '#1' must stay a literal")
+
+        // --- ⌫ at the start of a heading un-titles it
+        //
+        // The marker collapsed when the heading was made, so there is nothing
+        // visible to delete; ⌫ at the line's first position deletes the
+        // title-ness instead, and only then behaves like ⌫ again.
+        // The buffer holds "### Title" from the sequence above.
+        typeView.setSelectedRange(NSRange(location: 0, length: 0))
+        typeView.deleteBackward(nil)
+        check("⌫ at the start of a heading makes it plain text",
+              Attributed.markdown(from: typeView.attributedString()) == "Title",
+              "was '\(Attributed.markdown(from: typeView.attributedString()))' — "
+            + "this is the only way back; the marker gesture stops at level one")
+        check("the words survive it",
+              typeView.string == "Title", "was '\(typeView.string)'")
+        check("and what is typed next is plain",
+              { typeView.setSelectedRange(NSRange(location: 0, length: 0))
+                typeView.insertText("A", replacementRange: typeView.selectedRange())
+                let level = typeView.textStorage?.attribute(Attributed.headingKey, at: 0,
+                            effectiveRange: nil) as? Int ?? 0
+                typeView.setSelectedRange(NSRange(location: 1, length: 0))
+                typeView.deleteBackward(nil)
+                return level == 0 }())
+        check("⌫ on a plain line still deletes a character",
+              { typeView.setSelectedRange(NSRange(location: 2, length: 0))
+                typeView.deleteBackward(nil)
+                let out = typeView.string
+                typeView.insertText("i", replacementRange: typeView.selectedRange())
+                return out == "Ttle" }(),
+              "only the start of a heading line is special")
+        check("⌫ mid-heading still deletes a character too",
+              { typeAtFront("## ")
+                typeView.setSelectedRange(NSRange(location: 2, length: 0))
+                typeView.deleteBackward(nil)
+                let out = Attributed.markdown(from: typeView.attributedString())
+                typeView.insertText("i", replacementRange: typeView.selectedRange())
+                typeView.setSelectedRange(NSRange(location: 0, length: 0))
+                typeView.deleteBackward(nil)
+                return out == "## Ttle" }(),
+              "the heading survives ordinary editing inside the line")
+        check("and a heading can be made again afterwards",
+              { typeAtFront("# ")
+                let out = Attributed.markdown(from: typeView.attributedString())
+                typeView.setSelectedRange(NSRange(location: 0, length: 0))
+                typeView.deleteBackward(nil)
+                return out == "# Title" }(),
+              "un-title and re-title must be a round trip, not a one-way door")
+
+        // --- ⌃⌫
+        //
+        // The system binding sent it somewhere much bigger — "deleted
+        // everything before my cursor" was the report. It now deletes one word,
+        // the same as ⌥⌫.
+        let wordView = JotTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 100))
+        wordView.string = "delete the last word"
+        wordView.setSelectedRange(NSRange(location: wordView.string.count, length: 0))
+        if let ev = NSEvent.keyEvent(with: .keyDown, location: .zero,
+                                     modifierFlags: [.control], timestamp: 0,
+                                     windowNumber: 0, context: nil,
+                                     characters: "\u{7f}", charactersIgnoringModifiers: "\u{7f}",
+                                     isARepeat: false, keyCode: 51) {
+            wordView.keyDown(with: ev)
+            check("⌃⌫ deletes one word, not the line",
+                  wordView.string == "delete the last ",
+                  "was '\(wordView.string)'")
+            wordView.keyDown(with: ev)
+            check("and again for the word before it",
+                  wordView.string == "delete the ",
+                  "was '\(wordView.string)'")
+        } else {
+            check("⌃⌫ event could be synthesised", false)
+        }
+
+        // --- the menu bar menu
+        //
+        // There is no menu bar to read this off — the app is LSUIElement — and
+        // driving the status item needs assistive access this process does not
+        // have. So the menu is built and read here instead. It matters because
+        // "Show All" used to be one item that renamed itself to "Hide All" as
+        // soon as a single note was on screen, which is exactly when you want to
+        // bring the others back.
+        let barMenu = NSMenu()
+        AppDelegate().menuNeedsUpdate(barMenu)
+        let titles = barMenu.items.map(\.title)
+        check("the menu offers Show All", titles.contains("Show All Stickies"),
+              "got \(titles.prefix(4))")
+        check("and Hide All, separately", titles.contains("Hide All Stickies"),
+              "one item that renames itself cannot show what it is currently hiding")
+        check("Show All comes before Hide All",
+              (titles.firstIndex(of: "Show All Stickies") ?? 99)
+                  < (titles.firstIndex(of: "Hide All Stickies") ?? 0))
+        check("Hide All is greyed when nothing is showing",
+              barMenu.items.first { $0.title == "Hide All Stickies" }?.isEnabled
+                  == (StickyWindow.visibleCount > 0))
+
+        // --- a single tilde strikes out too
+        check("one tilde either side strikes text out",
+              styled("~gone~ but not this", .strikethrough) == "gone")
+        check("two tildes still work", styled("~~gone~~ ok", .strikethrough) == "gone")
+        check("a single tilde does not match inside a double",
+              Highlighter.styles(in: "~~gone~~").filter { $0.kind == .strikethrough }.count == 1,
+              "matching the inside of ~~a~~ would leave a stray marker on screen")
+        check("two home directories are not a strikethrough",
+              styled("see ~/Developer and ~/Documents", .strikethrough) == nil,
+              "the same hazard as \"$5 and $7\" being read as maths")
+        check("a lone tilde with spaces around it is just a tilde",
+              styled("a ~ b ~ c", .strikethrough) == nil)
+        check("a path on its own is untouched",
+              styled("cd ~/Developer", .strikethrough) == nil)
+        check("one tilde loses its marker on screen", shown("~gone~") == "gone")
+        // Both spellings mean the same thing, and the file gets the canonical
+        // one. Stated as a test rather than left to be discovered: `~a~` is
+        // accepted on the way in and written back as `~~a~~`.
+        check("a single tilde is written back as a double",
+              Attributed.markdown(from: Attributed.make(from: "~gone~", ink: .black,
+                                                        paper: .white)) == "~~gone~~",
+              "was \(Attributed.markdown(from: Attributed.make(from: "~gone~", ink: .black, paper: .white)))")
+
+        // --- snapping one note's size to another's
+        //
+        // A live resize cannot be photographed mid-drag, so the arithmetic is
+        // the thing to check. Throughout: `top` is a note 400 wide sitting above
+        // the one being resized, which starts at x=100 and is dragged by its
+        // right-hand side (so its left edge is what stays put).
+        let top = CGRect(x: 100, y: 600, width: 400, height: 200)
+        let below = CGRect(x: 100, y: 300, width: 380, height: 200)
+        let byTheRight = Snap.Anchor(fixedMinX: true, fixedMinY: true)
+
+        func width(_ proposed: CGFloat, _ others: [CGRect] = [top],
+                   from: CGRect = below, anchor: Snap.Anchor = byTheRight) -> CGFloat {
+            Snap.resize(from: from, to: CGSize(width: proposed, height: from.height),
+                        anchor: anchor, others: others).width
+        }
+
+        check("a width dragged near a neighbour's takes it exactly",
+              width(396) == 400,
+              "got \(width(396)) — this is the whole feature: two notes the same "
+            + "width without measuring them")
+        check("and from the other side too", width(405) == 400)
+        check("a width nowhere near one is left alone",
+              width(340) == 340, "got \(width(340))")
+        check("just outside the threshold does not snap",
+              width(400 - Snap.threshold - 1) == 400 - Snap.threshold - 1)
+        check("exactly on the threshold does",
+              width(400 - Snap.threshold) == 400)
+        check("with no other notes nothing snaps",
+              width(396, []) == 396, "the first note on screen must resize freely")
+
+        // The right edge landing on the neighbour's right edge. Here the notes
+        // are offset, so matching widths and aligning edges disagree — 40 wide
+        // would put this note's right edge on the top note's left edge.
+        let offset = CGRect(x: 60, y: 300, width: 380, height: 200)
+        check("an edge that lands on a neighbour's edge snaps to it",
+              width(438, [top], from: offset) == 440,
+              "got \(width(438, [top], from: offset)) — 60 + 440 = 500, the top "
+            + "note's right edge")
+        check("the nearer of the two kinds of snap wins",
+              width(402, [top], from: offset) == 400,
+              "matching the width is 2 away, aligning the right edge is 38; "
+            + "got \(width(402, [top], from: offset))")
+
+        // Dragging the left-hand side: the right edge is what stays put, so the
+        // same target width means moving the opposite edge.
+        let byTheLeft = Snap.Anchor(fixedMinX: false, fixedMinY: true)
+        check("dragging the other side snaps the other edge",
+              width(396, [top], from: below, anchor: byTheLeft) == 400,
+              "got \(width(396, [top], from: below, anchor: byTheLeft))")
+        check("aligning to the left edge of a neighbour",
+              // below.maxX is 480; snapping the left edge to top.minX (100)
+              // means a width of 380 — which it already is, so ask for 384.
+              width(384, [top], from: below, anchor: byTheLeft) == 380)
+
+        check("a snap is refused if it would go under the minimum size",
+              Snap.resize(from: below, to: CGSize(width: 396, height: 200),
+                          anchor: byTheRight, others: [top],
+                          minimum: CGSize(width: 420, height: 140)).width == 396,
+              "shrinking a note below what it is allowed to be is not a snap")
+        check("height snaps the same way",
+              Snap.resize(from: below, to: CGSize(width: 380, height: 196),
+                          anchor: byTheRight, others: [top]).height == 200)
+        check("the anchor is read from where the drag started",
+              Snap.Anchor.from(mouse: CGPoint(x: 470, y: 400), in: below).fixedMinX
+              && !Snap.Anchor.from(mouse: CGPoint(x: 110, y: 400), in: below).fixedMinX,
+              "grab the right-hand side and the left edge is what stays put")
+
+        // --- the equation-measuring window, which must never be seen
+        //
+        // It is a 2400×1200 borderless slab parked at -10000. AppKit pulls
+        // windows back onto a display when the screen arrangement changes, and
+        // a monitor being plugged in was enough to drop this one in the middle
+        // of a screen — the paper colour, no title bar, nothing to close.
+        let far = NSRect(x: -10000, y: -10000, width: 2400, height: 1200)
+        let measuring = MeasuringWindow(contentRect: NSRect(x: 0, y: 0, width: 2400, height: 1200),
+                                        styleMask: [.borderless], backing: .buffered, defer: false)
+        check("the measuring window refuses to be pulled onto a screen",
+              measuring.constrainFrameRect(far, to: NSScreen.main) == far,
+              "got \(measuring.constrainFrameRect(far, to: NSScreen.main))")
+        // The constraint is real and this is what it does — a titled window of
+        // the same size is dragged to roughly where the stray was found. Named
+        // here so the override above is not mistaken for cargo cult.
+        let titled = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 2400, height: 1200),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        check("AppKit really does relocate an offscreen window",
+              titled.constrainFrameRect(far, to: NSScreen.main) != far,
+              "got \(titled.constrainFrameRect(far, to: NSScreen.main)) — if this "
+            + "ever stops being true, the constraint is gone and so is the bug")
+        // The defence that holds however it got moved: nothing is drawn.
+        check("the measuring window is never on screen at all",
+              MathRenderer.measuringWindowIsInvisible,
+              "offscreen is a position and positions get changed; transparent "
+            + "stopped it being seen but not being there — it still landed under "
+            + "an external monitor's menu bar and made it glitch. A window never "
+            + "ordered in cannot be relocated onto a display at all")
         check("a heading is recorded as a heading",
               (Attributed.make(from: "# Title", ink: .black, paper: .white)
                 .attribute(Attributed.headingKey, at: 0, effectiveRange: nil) as? Int) == 1)
@@ -283,6 +761,24 @@ enum SelfTest {
                        "it cost $5 and then $7 more",
                        "**bold** then *italic* then `code` then ==mark==",
                        "# Heading with **bold** and $x^2$ in it",
+                       // Nested emphasis. Each of these used to come back with
+                       // its outer markers doubled around the inner run —
+                       // `==a ====**b**==== c==` — because every run was
+                       // wrapped in its whole style set instead of the markers
+                       // being opened and closed as the style changed.
+                       "==a **b** c==",
+                       "==a *b* c==",
+                       "**bold with ==mark== inside**",
+                       "==see [the paper](https://arxiv.org/abs/1) here==",
+                       "==a **b** and $x^2$ and *c*==",
+                       "==energy $x^2$ here==",
+                       "==energy $E=mc^2$ here==",
+                       "**energy $x^2$ here**",
+                       "~~gone $x^2$ here~~",
+                       "==a = b==",
+                       "==first== and ==second==",
+                       "==maths $x^2$ then **bold** after==",
+                       "## # Title",
                        "```\nlet x = 1\n```",
                        "line one\n\nline three after a blank\n",
                        "trailing spaces  \nand a second line"] {
@@ -308,6 +804,34 @@ enum SelfTest {
         check("⌘B twice takes it back off",
               Attributed.markdown(from: editor.attributedString()) == "make this bold",
               "toggling has to be symmetric or ⌘B becomes a one-way door")
+
+        // --- ⌘⇧H across an equation
+        //
+        // The equation is one attachment character, and the toggle used to skip
+        // it — "you cannot embolden a picture". But the style is also what says
+        // where the markers go, so dragging a highlight over an equation left
+        // the middle unstyled and the file was written as two highlights with a
+        // bare `$x^2$` stranded between them.
+        let mathEditor = NSTextView(frame: NSRect(x: 0, y: 0, width: 200, height: 100))
+        mathEditor.textStorage?.setAttributedString(
+            Attributed.make(from: "energy $x^2$ here", ink: .black, paper: .white))
+        let whole = NSRange(location: 0, length: mathEditor.textStorage?.length ?? 0)
+        mathEditor.setSelectedRange(whole)
+        mathEditor.jotToggle(.highlight)
+        check("⌘⇧H over an equation highlights the whole phrase",
+              Attributed.markdown(from: mathEditor.attributedString())
+                  == "==energy $x^2$ here==",
+              "was \(Attributed.markdown(from: mathEditor.attributedString()))")
+        check("the equation survived being highlighted",
+              mathEditor.textStorage?.attribute(Attributed.mathKey, at: 7,
+                                                effectiveRange: nil) != nil,
+              "the attachment's own attributes are the equation; replacing them "
+            + "wholesale would delete it")
+        mathEditor.setSelectedRange(NSRange(location: 0, length: mathEditor.textStorage?.length ?? 0))
+        mathEditor.jotToggle(.highlight)
+        check("and ⌘⇧H again takes it off, equation included",
+              Attributed.markdown(from: mathEditor.attributedString()) == "energy $x^2$ here",
+              "was \(Attributed.markdown(from: mathEditor.attributedString()))")
 
         // --- the main menu, which is what makes ⌘C and ⌘V work at all
         //

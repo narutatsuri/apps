@@ -9,6 +9,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSUpdateDynamicServices()
         if ProcessInfo.processInfo.environment["PN_DUMP"] == "1" { Diagnose.scheduleDump() }
         if ProcessInfo.processInfo.environment["PN_WINDOWS"] == "1" { Diagnose.scheduleWindowDump() }
+        if ProcessInfo.processInfo.environment["PN_WINTEST"] == "1" { Diagnose.scheduleWidthCheck() }
+        // PN_SELECT=<id> — open straight onto a paper, so the note pane can be
+        // photographed with something in it. The pane is a WKWebView, and a web
+        // view that fails to composite looks exactly like a paper with no notes;
+        // with no paper selected at all the app shows its empty state and the
+        // question cannot be answered either way. Same job as Frontier's
+        // FRONTIER_CLICKTEST.
+        if let id = ProcessInfo.processInfo.environment["PN_SELECT"], !id.isEmpty {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                MainActor.assumeIsolated { AppModel.shared.select(id) }
+            }
+        }
     }
 
     /// Finder's "Open With → Paper Notes", and files opened via `open -a`.
@@ -19,6 +31,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    /// Quitting mid-sentence must not cost the sentence: the autosave debounce
+    /// is a second wide, and this closes it.
+    func applicationWillTerminate(_ notification: Notification) {
+        MainActor.assumeIsolated { AppModel.shared.flushDraft(commit: true) }
+    }
 
     /// The notes window specifically — not "the first window that can become
     /// main", which was the bug. Graph and What-to-Read-Next can both become
@@ -98,6 +116,18 @@ struct PaperNotesApp: App {
         if let i = args.firstIndex(of: "--grade") {
             Commands.grade(Array(args[(i + 1)...]))
         }
+        if let i = args.firstIndex(of: "--peek-url") {
+            Commands.peekURL(Array(args[(i + 1)...]))
+        }
+        if let i = args.firstIndex(of: "--add-url") {
+            Commands.addURL(Array(args[(i + 1)...]))
+        }
+        if let i = args.firstIndex(of: "--repair-ids") {
+            Commands.repairIDs(Array(args[(i + 1)...]))
+        }
+        if let i = args.firstIndex(of: "--export-graph") {
+            Commands.exportGraph(Array(args[(i + 1)...]))
+        }
         if let i = args.firstIndex(of: "--import") {
             Importer.run(Array(args[(i + 1)...]))
         }
@@ -145,9 +175,6 @@ struct PaperNotesApp: App {
                 GraphCommand()
                 RecommendCommand()
                 Button("Edit Trusted Authors…") { model.editTrustedAuthors() }
-                Toggle("Appraise New Papers with Claude", isOn: Binding(
-                    get: { Prefs.autoAppraise },
-                    set: { Prefs.autoAppraise = $0 }))
                 Button("Rank Library by Interest") { model.rankLibrary() }
                     .keyboardShortcut("r", modifiers: [.command, .option])
                     .disabled(model.isRanking)

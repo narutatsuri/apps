@@ -35,17 +35,55 @@ struct RecommendationsView: View {
         .task { if model.recommendations.isEmpty && !model.isRecommending { model.loadRecommendations() } }
     }
 
+    /// The scoped paper's title, for the picker and the blurb.
+    private func paperName(_ id: String) -> String {
+        let p = model.papers.first { PDFRefs.normalise($0.arxivID) == PDFRefs.normalise(id) }
+        return String((p?.title.isEmpty == false ? p!.title : id).prefix(40))
+    }
+
+    private var blurb: String {
+        switch model.recommendScope {
+        case .library:
+            return "New on arXiv, papers like the ones you rated highest, work by people you follow, and what your library keeps citing."
+                + (model.papers.contains(where: \.starred)
+                   ? " Starred papers count treble."
+                   : " Star papers to weight them treble.")
+        case .project(let name):
+            return "Scoped to \(name): what its papers keep citing, similar work, and new arXiv matches for its vocabulary."
+        case .paper(let id):
+            return "Following on from \(paperName(id)): its bibliography, similar work, and new arXiv matches."
+        }
+    }
+
     private var header: some View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Recommended reading").font(.system(size: 15, weight: .semibold))
-                Text("New on arXiv, papers like the ones you rated highest, work by people you follow, and what your library keeps citing."
-                     + (model.papers.contains(where: \.starred)
-                        ? " Starred papers count treble."
-                        : " Star papers to weight them treble."))
+                Text(blurb)
                     .font(.system(size: 10)).foregroundStyle(.secondary)
             }
             Spacer()
+            // What the recommendations are for: everything, one project, or —
+            // when a row's "What to read after this" opened the window — one
+            // paper.
+            Picker("", selection: Binding(
+                get: { model.recommendScope },
+                set: { model.recommendScope = $0; model.loadRecommendations() })) {
+                Text("Whole library").tag(Recommender.Scope.library)
+                if !model.projects.isEmpty {
+                    Divider()
+                    ForEach(model.projects) { proj in
+                        Text(proj.name).tag(Recommender.Scope.project(proj.name))
+                    }
+                }
+                if case .paper(let id) = model.recommendScope {
+                    Divider()
+                    Text("After: \(paperName(id))").tag(model.recommendScope)
+                }
+            }
+            .pickerStyle(.menu).controlSize(.small).labelsHidden()
+            .disabled(model.isRecommending)
+            .help("Recommend for the whole library, one project, or one paper")
             Picker("", selection: Binding(
                 get: { Prefs.freshWindowDays },
                 set: { Prefs.freshWindowDays = $0; model.loadRecommendations(fresh: true) })) {

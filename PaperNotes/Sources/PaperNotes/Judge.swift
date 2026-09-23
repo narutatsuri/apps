@@ -69,10 +69,11 @@ enum Judge {
 
     /// The grading prompt, shared by the CLI and the button so they cannot drift.
     ///
-    /// It answers your questions as well as grading you. The note template has a
-    /// "What I didn't understand" heading precisely to collect confusion, and a
-    /// grader that reads that section only to mark you down for it is using the
-    /// most valuable thing in the note as evidence against you.
+    /// It answers your questions as well as grading you. The note templates have
+    /// a question-collecting heading — "Questions/Comments" now, "What I didn't
+    /// understand" before — precisely for this, and a grader that reads that
+    /// section only to mark you down for it is using the most valuable thing in
+    /// the note as evidence against you.
     static func gradeNote(_ paper: Paper) -> String? {
         let questions = paper.questions
         // A question about section 5 cannot be answered from the first six pages.

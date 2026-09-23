@@ -15,8 +15,19 @@ final class Library {
     /// markdown, so nothing about how you read, grep or push it changes; only
     /// where it sits. Never inside the `.app` bundle: `build.sh` replaces that
     /// on every rebuild, which would take the library with it.
-    nonisolated static let root = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Application Support/Paper Notes")
+    /// `PN_LIBROOT` points the whole library somewhere else — set by the
+    /// selftest (via setenv, before this is first touched) so probes that
+    /// drive the real select/save path can never write into, or commit to,
+    /// the actual notes repo. `getenv` rather than ProcessInfo: the selftest
+    /// sets it at runtime, and ProcessInfo's snapshot cannot be trusted to see
+    /// that.
+    nonisolated static let root: URL = {
+        if let raw = getenv("PN_LIBROOT"), raw.pointee != 0 {
+            return URL(fileURLWithPath: String(cString: raw))
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Paper Notes")
+    }()
 
     /// Where the library used to live.
     nonisolated private static let legacyRoot = FileManager.default
@@ -142,8 +153,13 @@ final class Library {
 
     /// Writes the note, replacing any earlier file for the same paper whose title —
     /// and therefore filename — has since changed.
+    ///
+    /// `commit: false` writes the file and skips the commit — the autosave path,
+    /// which fires as you type. Committing there would flood the history with
+    /// keystroke bursts; the changes are committed when you leave the note, and
+    /// `git add -A` sweeps anything still pending into the next commit anyway.
     @discardableResult
-    func save(_ paper: Paper) -> URL {
+    func save(_ paper: Paper, commit: Bool = true) -> URL {
         let fm = FileManager.default
         try? fm.createDirectory(at: Self.papersDir, withIntermediateDirectories: true)
 
@@ -156,7 +172,7 @@ final class Library {
         reload()
         if batchDepth > 0 {
             batchTouched += 1
-        } else {
+        } else if commit {
             Git.commit(at: Self.root, message: commitMessage(for: paper))
         }
         return target

@@ -31,6 +31,171 @@ enum Commands {
         exit(failures == 0 ? 0 : 1)
     }
 
+    // MARK: - Web pages
+
+    private static func resolveURL(_ args: [String], usage: String) -> (URL, WebIngest.Result) {
+        guard let raw = args.first, let url = WebIngest.ingestableURL(raw) else {
+            print(usage); exit(1)
+        }
+        let done = DispatchSemaphore(value: 0)
+        var got: WebIngest.Result?
+        Task.detached { got = await WebIngest.fetch(url); done.signal() }
+        _ = done.wait(timeout: .now() + 30)
+        guard let meta = got else {
+            print("✗ could not read \(url.absoluteString)"); exit(1)
+        }
+        return (url, meta)
+    }
+
+    /// `--peek-url <url>` — resolves a page the way --add-url would, without
+    /// touching the library. The way to check what a site declares about
+    /// itself before trusting the parser with it.
+    static func peekURL(_ args: [String]) -> Never {
+        let (url, meta) = resolveURL(args, usage: "usage: --peek-url <https://…>")
+        print("key:     \(WebIngest.key(for: url))")
+        print("title:   \(meta.title)")
+        print("authors: \(meta.authors.joined(separator: "; "))")
+        print("date:    \(meta.published.map { ISO8601DateFormatter().string(from: $0) } ?? "none found")")
+        exit(0)
+    }
+
+    /// `--add-url <url>` — ingests a web page as a library entry.
+    static func addURL(_ args: [String]) -> Never {
+        let (url, meta) = resolveURL(args, usage: "usage: --add-url <https://…>")
+        MainActor.assumeIsolated {
+            Library.shared.bootstrap()
+            let key = WebIngest.key(for: url)
+            guard Library.shared.paper(withID: key) == nil else {
+                print("already in the library as \(key)"); exit(0)
+            }
+            var paper = Paper(arxivID: key)
+            paper.title = meta.title
+            paper.authors = meta.authors
+            paper.publishedOn = meta.published
+            paper.year = meta.published.map { Calendar.current.component(.year, from: $0) }
+            paper.venue = url.host?.replacingOccurrences(of: "www.", with: "") ?? ""
+            paper.sourceURL = url.absoluteString
+            paper.readOn = Date()
+            Library.shared.save(paper)
+            print("✓ \(key)")
+            print("  \(meta.title)")
+            print("  \(meta.authors.joined(separator: "; "))"
+                  + (paper.year.map { " · \($0)" } ?? ""))
+        }
+        exit(0)
+    }
+
+    // MARK: - Repairing .pdf-suffixed ids
+
+    /// `--repair-ids` — re-keys papers whose id kept a ".pdf" extension from
+    /// the file they were dragged in as, then fetches the metadata that the
+    /// broken key made unfetchable. Also fetches for any other paper with no
+    /// authors on record. The notes repo's git history is the backup.
+    static func repairIDs(_ args: [String]) -> Never {
+        MainActor.assumeIsolated {
+            Library.shared.bootstrap()
+            let summary = repairCore(fetchMetadata: true)
+            print("re-keyed \(summary.rekeyed) · metadata fetched \(summary.fetched)"
+                  + " · skipped \(summary.skipped)")
+        }
+        exit(0)
+    }
+
+    /// The testable core. `fetchMetadata: false` re-keys without the network,
+    /// which is what the selftest drives against its temp library.
+    @MainActor
+    @discardableResult
+    static func repairCore(fetchMetadata: Bool) -> (rekeyed: Int, fetched: Int, skipped: Int) {
+        let papers = Library.shared.papers
+        var claimed = Set(papers.map(\.arxivID))
+        var rekeyed = 0, fetched = 0, skipped = 0
+        Library.shared.batch({ "repair: re-keyed .pdf ids and refetched metadata for \($0) papers" }) {
+            for var paper in papers {
+                let clean = PDFRefs.normalise(paper.arxivID)
+                let needsKey = paper.arxivID.lowercased().hasSuffix(".pdf")
+                    && Paper.isArxivID(clean)
+                let needsMeta = paper.authors.isEmpty
+                guard needsKey || needsMeta else { continue }
+
+                if needsKey {
+                    guard !claimed.contains(clean) else {
+                        print("  ! \(paper.arxivID) — \(clean) already exists, left alone")
+                        skipped += 1
+                        continue
+                    }
+                    claimed.insert(clean)
+                    // The old note file starts with the clean id, so saving
+                    // under the new key replaces it via save()'s own
+                    // same-prefix cleanup. The stored PDF is renamed to the
+                    // name adopt() would use today; if that fails, the old
+                    // absolute path still resolves.
+                    let want = Library.pdfStore.appendingPathComponent("\(clean).pdf")
+                    if !paper.pdfPath.isEmpty,
+                       FileManager.default.fileExists(atPath: paper.pdfPath),
+                       paper.pdfPath != want.path,
+                       (try? FileManager.default.moveItem(
+                            at: URL(fileURLWithPath: paper.pdfPath), to: want)) != nil {
+                        paper.pdfPath = want.path
+                    }
+                    paper.arxivID = clean
+                    rekeyed += 1
+                }
+
+                if fetchMetadata, paper.isArxiv || Paper.isACLID(paper.arxivID) {
+                    let done = DispatchSemaphore(value: 0)
+                    var got: Metadata.Result?
+                    let id = paper.arxivID
+                    Task.detached { got = await Metadata.fetch(arxivID: id); done.signal() }
+                    _ = done.wait(timeout: .now() + 60)
+                    if let m = got {
+                        paper.title = m.title
+                        paper.authors = m.authors
+                        paper.year = m.year
+                        paper.venue = m.venue
+                        paper.citations = m.citations
+                        fetched += 1
+                        print("  ✓ \(paper.arxivID)  \(m.authors.first ?? "?") · \(String(m.title.prefix(50)))")
+                    } else {
+                        print("  ? \(paper.arxivID) — lookup failed, key fixed anyway")
+                    }
+                }
+                Library.shared.save(paper)
+            }
+        }
+        return (rekeyed, fetched, skipped)
+    }
+
+    // MARK: - Website graph
+
+    /// `--export-graph <path>` writes the citation graph for the website.
+    /// A `.js` path wraps the JSON in `window.READING_GRAPH = …`, which is what
+    /// the site loads (it keeps a local `file://` preview working); any other
+    /// path gets plain JSON.
+    static func exportGraph(_ args: [String]) -> Never {
+        guard let path = args.first else {
+            print("usage: --export-graph <path.js|path.json>"); exit(1)
+        }
+        MainActor.assumeIsolated {
+            Library.shared.bootstrap()
+            let text = GraphExport.text(for: Library.shared.papers,
+                                        wrap: path.hasSuffix(".js"))
+            let payload = GraphExport.payload(for: Library.shared.papers)
+            do {
+                try text.write(toFile: (path as NSString).expandingTildeInPath,
+                               atomically: true, encoding: .utf8)
+            } catch {
+                print("could not write \(path): \(error.localizedDescription)")
+                exit(1)
+            }
+            let nodes = payload["nodes"] as? [[String: Any]] ?? []
+            let filled = nodes.filter { ($0["summary"] as? String)?.isEmpty == false }
+            print("wrote \(path)")
+            print("\(nodes.count) papers · \(filled.count) with a claim written"
+                  + " · \((payload["edges"] as? [[Any]])?.count ?? 0) edges")
+        }
+        exit(0)
+    }
+
     // MARK: - Search
 
     /// `--search <terms>` runs the same matcher the sidebar uses, so what the

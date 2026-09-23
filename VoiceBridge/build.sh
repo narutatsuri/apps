@@ -82,6 +82,19 @@ cp -R "$BUNDLE" "/Applications/$APP.app"
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
   -f "/Applications/$APP.app" 2>/dev/null || true
 
+# The staging bundle is unregistered and deleted once it is installed.
+#
+# Leaving a second launchable .app on disk is how the duplicate Jot started:
+# it gets opened once — Spotlight, or a double-click while poking around in
+# the build directory — and from then on macOS relaunches it at every login
+# alongside the real one, sharing its bundle id and its data directory.
+# Unregistering first because LaunchServices notices a new .app the moment it
+# appears, so deleting the bundle alone leaves an entry pointing at a path
+# that no longer exists — inert, but still a second entry for this id.
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
+  -u "$BUNDLE" 2>/dev/null || true
+rm -rf "$BUNDLE"
+
 if [ "${NO_LAUNCH:-0}" != "1" ]; then
   echo "==> Launching"
   open "/Applications/$APP.app"

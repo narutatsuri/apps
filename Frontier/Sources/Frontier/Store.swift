@@ -48,9 +48,18 @@ final class Store {
     @discardableResult
     func add(_ concepts: [Concept]) -> Int {
         let existing = Set(self.concepts.map(\.id))
+        let incoming = concepts.filter { !existing.contains($0.id) }
+        // Prerequisites are repaired on the way in, against the graph as it will
+        // be. The model writes `requires:` by inventing an id from a title, so
+        // left alone every expansion adds a fresh crop of edges that point at
+        // nothing — and an edge pointing at nothing is silently no edge at all
+        // (see Frontier.resolve). Repairing here is what stops the loose ends
+        // accumulating faster than --grow can fill them.
+        let (repaired, _) = Frontier.relinked(self.concepts + incoming)
+        let byID = Dictionary(uniqueKeysWithValues: repaired.map { ($0.id, $0) })
         var added = 0
-        for c in concepts where !existing.contains(c.id) {
-            save(c)
+        for c in incoming {
+            save(byID[c.id] ?? c)
             added += 1
         }
         return added

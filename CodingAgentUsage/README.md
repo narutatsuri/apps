@@ -23,7 +23,7 @@ call. This is the whole basis of the app:
 | | Endpoint | Auth |
 |---|---|---|
 | Claude | `GET https://api.anthropic.com/api/oauth/usage` | keychain item `Claude Code-credentials`, plus header `anthropic-beta: oauth-2025-04-20` |
-| Codex | `GET https://chatgpt.com/backend-api/wham/usage` | `~/.codex/auth.json`, plus header `chatgpt-account-id` |
+| Codex | `GET https://chatgpt.com/backend-api/wham/usage` | `auth.json` in `~/.codex` and every `~/.codex-<name>`, plus header `chatgpt-account-id` |
 
 Rejected alternatives, for the record: `~/.claude.json → cachedUsageUtilization` has
 the right shape but only refreshes while Claude Code runs (it was 12 days stale when
@@ -75,3 +75,21 @@ is worse than showing numbers a few minutes old.
 | `Token expired — run 'claude' once` | access token aged out; running either CLI refreshes it |
 | Keychain prompt on launch | approve once with *Always Allow*; the app shells out to `/usr/bin/security` rather than calling `SecItemCopyMatching` precisely so this survives rebuilds |
 | `Error registering app with intents framework` in logs | benign; every ad-hoc-signed SwiftUI app emits it |
+
+## Two Codex accounts
+
+`codex login` keeps one credential per home and *replaces* it — logging into a
+second account overwrites the first. `CODEX_HOME` gives each account a home of
+its own, and the app shows every home it finds:
+
+    ~/.codex             the default — plain `codex` uses this one
+    ~/.codex-personal    CODEX_HOME=~/.codex-personal codex login
+
+Each becomes its own section (labelled by email) and its own part of the menu
+bar text: `X` for the default home, `Xp` for `.codex-personal`, and so on.
+
+The CLI only refreshes the token of the home it is run against, and access
+tokens last ten days — if a section says "token expired", run the command it
+names once (`CODEX_HOME=~/.codex-personal codex`). An alias saves typing:
+
+    alias codexp='CODEX_HOME=~/.codex-personal codex'

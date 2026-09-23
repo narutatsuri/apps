@@ -14,11 +14,22 @@ struct SplitPane<Left: View, Right: View>: View {
     @ViewBuilder let right: Right
 
     @State private var widthAtDragStart: CGFloat?
+    /// The width the split actually has, so the left pane can yield when the
+    /// window narrows. The rigid `frame(width:)` below is what keeps layout
+    /// simple — but rigid means it counts toward the window's minimum size, and
+    /// a 520pt slab was most of why the window refused to go below 980pt.
+    /// Watching the real width and clamping the stored one keeps both: the pane
+    /// sits exactly where you dragged it, and gives way instead of blocking.
+    @State private var totalWidth: CGFloat = .infinity
+
+    /// Leaves the right pane at least 120pt — a divider you can no longer drag
+    /// because the handle left the window is a divider that is simply broken.
+    private var maxLeft: CGFloat { max(180, min(1000, totalWidth - 120)) }
 
     var body: some View {
         HStack(spacing: 0) {
             left
-                .frame(width: leftWidth)
+                .frame(width: min(leftWidth, maxLeft))
                 .frame(maxHeight: .infinity)
                 .clipped()
             Divider()
@@ -34,7 +45,7 @@ struct SplitPane<Left: View, Right: View>: View {
                                 .onChanged { g in
                                     let base = widthAtDragStart ?? leftWidth
                                     if widthAtDragStart == nil { widthAtDragStart = leftWidth }
-                                    leftWidth = min(1000, max(300, base + g.translation.width))
+                                    leftWidth = min(maxLeft, max(180, base + g.translation.width))
                                 }
                                 .onEnded { _ in widthAtDragStart = nil }
                         )
@@ -42,6 +53,7 @@ struct SplitPane<Left: View, Right: View>: View {
             right
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { totalWidth = $0 }
     }
 }
 
@@ -86,6 +98,15 @@ struct ContentView: View {
     /// papers at once; the editor still follows whichever one is the anchor.
     @State private var selection: Set<String> = []
     @State private var query = ""
+    @Environment(\.openWindow) private var openWindow
+    /// The sidebar's project filter: nil is everything, "" is untagged papers,
+    /// a name is that project. Not persisted, like the sort order — a filter
+    /// that silently survives a relaunch reads as papers having vanished.
+    @State private var projectFilter: String?
+
+    private var visiblePapers: [Paper] {
+        Projects.papers(model.papers, matching: projectFilter)
+    }
 
     /// The selection in the order the list shows it, so queuing three papers
     /// reads them top-to-bottom rather than in Set order — which is arbitrary and
@@ -105,8 +126,15 @@ struct ContentView: View {
             Divider()
             statusBar
         }
-        .frame(minWidth: 980, minHeight: 600)
+        // 480, not the 980 this started at: the floor should be the last resort
+        // below which nothing is usable, not the width the design looks best at.
+        // Everything that used to *demand* width — the rigid editor split, the
+        // fixed-size verdict picker — now yields instead, so half a screen is a
+        // legitimate place to keep this window.
+        .frame(minWidth: 480, minHeight: 600)
         .sheet(isPresented: $model.showingAdd) { AddPaperSheet(model: model) }
+        .sheet(isPresented: $model.showingNewProject) { NewProjectSheet(model: model) }
+        .sheet(isPresented: $model.showingProjects) { ManageProjectsSheet(model: model) }
         .sheet(isPresented: Binding(get: { model.gradeResult != nil },
                                     set: { if !$0 { model.gradeResult = nil } })) {
             GradeSheet(model: model)
@@ -184,14 +212,44 @@ struct ContentView: View {
                 .pickerStyle(.menu)
                 .controlSize(.small)
                 .labelsHidden()
+                // Only once projects exist — most papers carry no tag, and a
+                // filter over nothing is chrome.
+                if !model.projects.isEmpty {
+                    HStack(spacing: 5) {
+                        if let name = projectFilter, !name.isEmpty {
+                            Circle()
+                                .fill(Color(hex: model.project(named: name)?.colour.fill
+                                            ?? 0x8E8E93))
+                                .frame(width: 7, height: 7)
+                        }
+                        Picker("Project", selection: $projectFilter) {
+                            Text("All projects").tag(String?.none)
+                            ForEach(model.projects) { proj in
+                                Text(proj.name).tag(String?.some(proj.name))
+                            }
+                            Text("No project").tag(String?.some(""))
+                        }
+                        .pickerStyle(.menu)
+                        .controlSize(.small)
+                        .labelsHidden()
+                    }
+                }
             }
             if !query.isEmpty {
                 let hits = Search.matches(query, in: model.papers)
                 Section(hits.isEmpty ? "No matches" : "\(hits.count) match\(hits.count == 1 ? "" : "es")") {
                     ForEach(hits, id: \.paper.arxivID) { hit in
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(hit.paper.title.isEmpty ? hit.paper.arxivID : hit.paper.title)
-                                .font(.system(size: 12)).lineLimit(2)
+                            HStack(alignment: .top, spacing: 5) {
+                                if let colour = projectDot(hit.paper) {
+                                    Circle().fill(colour)
+                                        .frame(width: 7, height: 7)
+                                        .padding(.top, 3.5)
+                                        .help(hit.paper.project)
+                                }
+                                Text(hit.paper.title.isEmpty ? hit.paper.arxivID : hit.paper.title)
+                                    .font(.system(size: 12)).lineLimit(2)
+                            }
                             if !hit.snippet.isEmpty {
                                 Text(hit.snippet)
                                     .font(.system(size: 10)).foregroundStyle(.secondary)
@@ -236,33 +294,37 @@ struct ContentView: View {
                 }
             }
             if query.isEmpty {
-            Section("Read · \(model.papers.filter(\.isSubstantive).count) of \(model.papers.count)") {
-                ForEach(model.papers) { p in
+            Section("Read · \(visiblePapers.filter(\.isSubstantive).count) of \(visiblePapers.count)") {
+                ForEach(visiblePapers) { p in
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(p.title.isEmpty ? p.arxivID : p.title)
-                            .font(.system(size: 12, weight: p.isSubstantive ? .regular : .light))
-                            .foregroundStyle(p.isSubstantive ? .primary : .secondary)
-                            .lineLimit(2)
+                        // The dot is the project, wherever the row appears. Top
+                        // aligned with a nudge so it sits beside the title's
+                        // first line rather than floating mid-row on two-liners.
+                        HStack(alignment: .top, spacing: 5) {
+                            if let colour = projectDot(p) {
+                                Circle().fill(colour)
+                                    .frame(width: 7, height: 7)
+                                    .padding(.top, 3.5)
+                                    .help(p.project)
+                            }
+                            Text(p.title.isEmpty ? p.arxivID : p.title)
+                                .font(.system(size: 12, weight: p.isSubstantive ? .regular : .light))
+                                .foregroundStyle(p.isSubstantive ? .primary : .secondary)
+                                .lineLimit(2)
+                        }
                         HStack(spacing: 6) {
                             if p.starred {
                                 Image(systemName: "star.fill")
                                     .font(.system(size: 8))
                                     .foregroundStyle(Color(hex: 0xEDA100))
                             }
-                            // Claude's grade until you write your own over it, so the
-                            // list is sorted by interest from the moment a paper
-                            // lands rather than only after you have read it.
-                            if p.effectiveVerdict != .unset {
-                                Text(p.effectiveVerdict.label)
+                            // Your grade, only yours — Claude's appraisal used to
+                            // stand in here, and was removed at the user's request.
+                            if p.verdict != .unset {
+                                Text(p.verdict.label)
                                     .font(.system(size: 8, weight: .semibold))
                                     .padding(.horizontal, 4).padding(.vertical, 1)
-                                    .background(Capsule().fill(
-                                        p.verdict == .unset ? AnyShapeStyle(.quinary)
-                                                            : AnyShapeStyle(.quaternary)))
-                            }
-                            if model.appraising.contains(p.arxivID) {
-                                ProgressView().controlSize(.small).scaleEffect(0.4)
-                                    .frame(width: 10, height: 10)
+                                    .background(Capsule().fill(.quaternary))
                             }
                             Text(p.arxivID).font(.system(size: 9).monospaced())
                             if !p.refs.isEmpty { Text("\(p.refs.count) refs").font(.system(size: 9)) }
@@ -277,7 +339,10 @@ struct ContentView: View {
             }
             }
         }
-        .frame(minWidth: 250)
+        // The split view's own API rather than a frame floor on the List — a
+        // frame minimum here counts toward the *window's* minimum even when the
+        // sidebar could reasonably give way.
+        .navigationSplitViewColumnWidth(min: 190, ideal: 250)
     }
 
     /// Shared by the library list and the search results, so an action available
@@ -298,6 +363,13 @@ struct ContentView: View {
         }
         Divider()
         Button(p.starred ? "Remove star" : "Star this paper") { model.toggleStar(p) }
+        Button("What to read after this…") {
+            model.recommendScope = .paper(p.arxivID)
+            openWindow(id: WindowID.recommend)
+            NSApp.activate(ignoringOtherApps: true)
+            model.loadRecommendations()
+        }
+        ProjectPicker(model: model, current: p.project, targets: targets)
         if !p.pdfPath.isEmpty {
             Button("Open PDF") { model.startReading(p) }
         }
@@ -305,6 +377,14 @@ struct ContentView: View {
         // Destructive, and it takes the stored PDF with it, so it asks first
         // rather than relying on undo that does not exist.
         Button("Delete…", role: .destructive) { model.confirmDelete = p }
+    }
+
+    /// The sidebar dot for a tagged paper: its project's colour, or grey when
+    /// the tag names a project `projects.txt` no longer lists — the tag belongs
+    /// to the paper, so it outlives a registry edit rather than vanishing.
+    private func projectDot(_ p: Paper) -> Color? {
+        guard !p.project.isEmpty else { return nil }
+        return Color(hex: model.project(named: p.project)?.colour.fill ?? 0x8E8E93)
     }
 
     private var placeholder: some View {
@@ -350,7 +430,7 @@ struct EditorPane: View {
                 SplitPane(leftWidth: $leftWidth) {
                     TextEditor(text: Binding(
                         get: { model.draft?.body ?? "" },
-                        set: { model.draft?.body = $0 }))
+                        set: { model.draft?.body = $0; model.noteEdited() }))
                         .font(.system(size: 12.5, design: .monospaced))
                         .lineSpacing(2)
                         .scrollContentBackground(.hidden)
@@ -413,6 +493,43 @@ struct NoteHeader: View {
                 // height on every selection and shove the panes below it around.
                 .lineLimit(2)
                 .fixedSize(horizontal: false, vertical: true)
+
+            // The project, right under the title. Fixed height whether or not
+            // there is one — this header's rows are pinned so that selecting a
+            // different paper never shifts the panes below it.
+            HStack(spacing: 6) {
+                Menu {
+                    ProjectPicker(model: model, current: paper.project,
+                                  targets: [paper.arxivID], flat: true)
+                } label: {
+                    if paper.project.isEmpty {
+                        Text("project…")
+                            .font(.system(size: 10)).foregroundStyle(.tertiary)
+                    } else {
+                        let proj = model.project(named: paper.project)
+                        Text(paper.project)
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(proj.map { Color(hex: $0.colour.ink) } ?? .white)
+                            .padding(.horizontal, 7).padding(.vertical, 2)
+                            .background(RoundedRectangle(cornerRadius: 4)
+                                .fill(Color(hex: proj?.colour.fill ?? 0x8E8E93)))
+                    }
+                }
+                .menuStyle(.button)
+                .buttonStyle(.plain)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help(paper.project.isEmpty
+                      ? "Tag this paper with a project"
+                      : "Project — click to change or remove")
+                Spacer()
+            }
+            .frame(height: 18)
+            // Same rule as the verdict row: a long project name must not set
+            // the window's minimum width.
+            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+            .clipped()
+
             HStack(spacing: 8) {
                 if !paper.authors.isEmpty {
                     Text(paper.authors.prefix(3).joined(separator: ", ")
@@ -438,7 +555,7 @@ struct NoteHeader: View {
             HStack(spacing: 10) {
                 Picker("", selection: Binding(
                     get: { model.draft?.verdict ?? .unset },
-                    set: { model.draft?.verdict = $0 })) {
+                    set: { model.draft?.verdict = $0; model.noteEdited() })) {
                     ForEach(Verdict.allCases, id: \.self) { Text($0.label).tag($0) }
                 }
                 .pickerStyle(.segmented)
@@ -478,52 +595,17 @@ struct NoteHeader: View {
             // The row keeps a fixed height whatever it contains, so selecting a
             // different paper can never shift the panes below it.
             .frame(height: 22)
+            // And it reports no minimum width: the segmented picker is
+            // `fixedSize`, and a fixed-size control in an unguarded row bids
+            // its full width into the *window's* minimum. In a window too
+            // narrow for the whole row the right end clips — a trade the
+            // narrow window is choosing, where a hard floor chooses for it.
+            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+            .clipped()
 
-            appraisalRow
-                // Same reason: one line, always, whatever it holds. A reason that
-                // wrapped to two lines on some papers would move the editor.
-                .frame(height: 15)
-        }
-    }
-}
-
-extension NoteHeader {
-    /// Claude's read on whether the idea is worth your time — graded on how
-    /// surprising and generative it is, not on how carefully it was executed.
-    @ViewBuilder
-    var appraisalRow: some View {
-        HStack(spacing: 6) {
-            if model.appraising.contains(paper.arxivID) {
-                ProgressView().controlSize(.small).scaleEffect(0.55)
-                    .frame(width: 12, height: 12)
-                Text("Claude is reading it…")
-                    .font(.system(size: 10)).foregroundStyle(.tertiary)
-            } else if paper.appraisal != .unset {
-                Text("Claude: \(paper.appraisal.label)")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                // The position is the honest part. The band is only a coarsening of
-                // it, and a band assigned without ranking meant almost nothing.
-                if paper.appraisalRank > 0 {
-                    Text("#\(paper.appraisalRank) of \(model.papers.filter { $0.appraisalRank > 0 }.count)")
-                        .font(.system(size: 9)).foregroundStyle(.tertiary)
-                }
-                Text(paper.appraisalNote)
-                    .font(.system(size: 10)).foregroundStyle(.tertiary)
-                    .lineLimit(1).truncationMode(.tail)
-                    // The full sentence is in the note file either way; the tooltip
-                    // saves opening it.
-                    .help(paper.appraisalNote)
-                if paper.overridesAppraisal {
-                    Text("· you said \(paper.verdict.label)")
-                        .font(.system(size: 9)).foregroundStyle(.tertiary)
-                }
-            } else if !paper.pdfPath.isEmpty && Judge.isAvailable {
-                Button("Ask Claude if it's worth reading") { model.appraise(paper) }
-                    .buttonStyle(.link)
-                    .font(.system(size: 10))
-            }
-            Spacer()
+            // The appraisal row lived here — "Claude: SOLID · #12 of 150" —
+            // removed 2026-09-06 at the user's request, together with the
+            // automatic appraisal on add.
         }
     }
 }
@@ -578,6 +660,162 @@ private struct RelatedPanel: View {
     }
 }
 
+/// The project choices, shared between the row context menu (as a submenu) and
+/// the header chip (flat, since the chip itself is the menu) — an action
+/// available on a paper should not depend on how you found it.
+struct ProjectPicker: View {
+    @Bindable var model: AppModel
+    let current: String
+    let targets: [String]
+    var flat = false
+
+    var body: some View {
+        if flat { items } else { Menu("Project") { items } }
+    }
+
+    @ViewBuilder
+    private var items: some View {
+        ForEach(model.projects) { proj in
+            Button(proj.name
+                   + (current.lowercased() == proj.name.lowercased() ? "  ✓" : "")) {
+                model.assign(project: proj.name, to: targets)
+            }
+        }
+        if !model.projects.isEmpty { Divider() }
+        if !current.isEmpty {
+            Button("Remove from \(current)") { model.assign(project: nil, to: targets) }
+        }
+        Button("New Project…") {
+            model.newProjectTargets = targets
+            model.showingNewProject = true
+        }
+        if !model.projects.isEmpty {
+            Button("Manage Projects…") { model.showingProjects = true }
+        }
+    }
+}
+
+/// Every project with its colour and a way out. Colours are the eight
+/// swatches, click to change; deleting untags the project's papers and says
+/// so before it does.
+private struct ManageProjectsSheet: View {
+    @Bindable var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var deleting: Project?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Projects").font(.system(size: 14, weight: .semibold))
+            if model.projects.isEmpty {
+                Text("No projects yet.").font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+            ForEach(model.projects) { proj in
+                HStack(spacing: 10) {
+                    Circle().fill(Color(hex: proj.colour.fill)).frame(width: 9, height: 9)
+                    Text(proj.name).font(.system(size: 12)).lineLimit(1)
+                    Text("\(model.papers(inProject: proj.name).count)")
+                        .font(.system(size: 10)).foregroundStyle(.tertiary)
+                    Spacer()
+                    HStack(spacing: 5) {
+                        ForEach(ProjectColour.allCases, id: \.self) { c in
+                            Button { model.recolour(project: proj.name, to: c) } label: {
+                                Circle().fill(Color(hex: c.fill))
+                                    .overlay(Circle().strokeBorder(
+                                        c == proj.colour ? Color.primary : .clear, lineWidth: 1.5))
+                                    .frame(width: 14, height: 14)
+                            }
+                            .buttonStyle(.plain)
+                            .help(c.rawValue)
+                        }
+                    }
+                    Button { deleting = proj } label: {
+                        Image(systemName: "trash").font(.system(size: 11))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .help("Delete this project — its papers stay, untagged")
+                }
+            }
+            HStack {
+                Spacer()
+                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(18)
+        .frame(width: 460)
+        .alert("Delete \"\(deleting?.name ?? "")\"?",
+               isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } })) {
+            Button("Cancel", role: .cancel) { deleting = nil }
+            Button("Delete", role: .destructive) {
+                if let d = deleting { model.deleteProject(named: d.name) }
+                deleting = nil
+            }
+        } message: {
+            let n = deleting.map { model.papers(inProject: $0.name).count } ?? 0
+            Text(n == 0 ? "No papers carry it."
+                 : "\(n) paper\(n == 1 ? "" : "s") will be untagged. The papers themselves stay.")
+        }
+    }
+}
+
+private struct NewProjectSheet: View {
+    @Bindable var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var name = ""
+    @State private var picked: ProjectColour?
+    @State private var clash = false
+
+    /// Preselects the least-used colour, so eight projects made without ever
+    /// touching the swatches still come out distinguishable.
+    private var colour: ProjectColour { picked ?? Projects.nextColour(model.projects) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("New project").font(.system(size: 14, weight: .semibold))
+            TextField("Name — e.g. CoT monitorability", text: $name)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit(create)
+            HStack(spacing: 8) {
+                ForEach(ProjectColour.allCases, id: \.self) { c in
+                    Button { picked = c } label: {
+                        Circle().fill(Color(hex: c.fill))
+                            .overlay(Circle().strokeBorder(
+                                c == colour ? Color.primary : .clear, lineWidth: 2))
+                            .frame(width: 18, height: 18)
+                    }
+                    .buttonStyle(.plain)
+                    .help(c.rawValue)
+                }
+            }
+            if clash {
+                Text("A project with that name already exists.")
+                    .font(.system(size: 10)).foregroundStyle(.red)
+            }
+            Text(model.newProjectTargets.count <= 1
+                 ? "The paper you started from will be tagged with it."
+                 : "The \(model.newProjectTargets.count) selected papers will be tagged with it.")
+                .font(.system(size: 9)).foregroundStyle(.tertiary)
+            HStack {
+                Spacer()
+                Button("Cancel") { model.newProjectTargets = []; dismiss() }
+                Button("Create", action: create)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(18)
+        .frame(width: 380)
+    }
+
+    private func create() {
+        if model.createProject(named: name, colour: colour) {
+            dismiss()
+        } else {
+            clash = !name.trimmingCharacters(in: .whitespaces).isEmpty
+        }
+    }
+}
+
 private struct AddPaperSheet: View {
     @Bindable var model: AppModel
     @Environment(\.dismiss) private var dismiss
@@ -587,7 +825,7 @@ private struct AddPaperSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Add a paper").font(.system(size: 14, weight: .semibold))
-            TextField("arXiv id or URL — e.g. 2510.23966", text: $entry)
+            TextField("arXiv id, or any URL — a blog post works too", text: $entry)
                 .textFieldStyle(.roundedBorder)
 
             HStack(spacing: 8) {

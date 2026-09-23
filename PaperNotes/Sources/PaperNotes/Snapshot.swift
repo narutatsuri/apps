@@ -33,6 +33,55 @@ enum Snapshot {
             print("selected \(richest.arxivID) with \(model.related.count) relation(s)")
         }
 
+        // `--snapshot <path> w h chip`: proves the project chip actually draws in
+        // the header — a synthetic paper and an in-memory registry, so nothing
+        // touches the library or its git history. Counts pixels of the project's
+        // fill colour: a chip that fails to render is exactly the kind of fault
+        // no logic test can see.
+        if arguments.contains("chip") {
+            var probe = Paper(arxivID: "0000.00000")
+            probe.title = "A synthetic paper for the chip probe"
+            probe.project = "Chip Probe"
+            model.projects = [Project(name: "Chip Probe", colour: .teal)]
+            model.selectedID = nil
+            model.draft = nil
+            let header = AnyView(NoteHeader(model: model, paper: probe)
+                .frame(width: 700).padding(10).background(Color.white))
+            let renderer = ImageRenderer(content: header)
+            renderer.scale = 1
+            guard let img = renderer.nsImage, let tiff = img.tiffRepresentation,
+                  let rep = NSBitmapImageRep(data: tiff) else {
+                print("FAIL  chip probe — header did not render"); exit(1)
+            }
+            let want = ProjectColour.teal.fill
+            let target = (r: Double((want >> 16) & 0xFF) / 255,
+                          g: Double((want >> 8) & 0xFF) / 255,
+                          b: Double(want & 0xFF) / 255)
+            // The rep's raw components, no colour-space conversion: the stored
+            // bytes are exactly what Color(hex:) put in, and converting through
+            // sRGB re-applies a profile — measured shifting every channel far
+            // enough that 848 byte-exact chip pixels counted as zero.
+            var hits = 0
+            for y in 0..<rep.pixelsHigh {
+                for x in 0..<rep.pixelsWide {
+                    guard let c = rep.colorAt(x: x, y: y) else { continue }
+                    if abs(c.redComponent - target.r) < 0.06,
+                       abs(c.greenComponent - target.g) < 0.06,
+                       abs(c.blueComponent - target.b) < 0.06 { hits += 1 }
+                }
+            }
+            // The chip is ~60×16pt; even with antialiased edges that is
+            // hundreds of pixels of fill. A threshold well below that still
+            // cleanly rejects zero-pixels-drawn.
+            let ok = hits > 100
+            print("\(ok ? "PASS" : "FAIL")  the project chip draws in the header — "
+                + "\(hits) pixels of its colour rendered")
+            if let png = rep.representation(using: .png, properties: [:]) {
+                try? png.write(to: URL(fileURLWithPath: path))
+            }
+            exit(ok ? 0 : 1)
+        }
+
         // The editor pane, not ContentView: NavigationSplitView rasterises as a
         // prohibition glyph under ImageRenderer, and the layout under test is in here.
         let width0 = Binding.constant(CGFloat(width * 0.45))
